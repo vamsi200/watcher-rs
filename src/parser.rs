@@ -6,6 +6,16 @@ use std::{
     path,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use std::{ptr::read, thread::sleep};
+
+use anyhow::Error;
+use aya::{
+    Btf, Ebpf, include_bytes_aligned,
+    maps::{MapData, RingBuf},
+    programs::{FEntry, TracePoint},
+};
+use aya_log::EbpfLogger;
+use watcher_rs_common::ExecEvent;
 
 // like a snapshot
 #[derive(Debug)]
@@ -14,6 +24,42 @@ pub struct ProcessInfo {
     ppid: u32,
     name: String,
     cmdline: String,
+}
+
+impl ProcessInfo {
+    pub fn get_process_info_from_pid(i_pid: u32) -> Self {
+        let mut cmdline = String::new();
+        let mut ppid = 0u32;
+        let mut pid = 0u32;
+        let mut name = String::new();
+
+        if let Ok(file) = File::open(format!("/proc/{}/status", i_pid)) {
+            let mut reader = BufReader::new(file);
+            for line in reader.lines() {
+                let line = line.unwrap_or_default();
+                let split: Vec<&str> = line.trim().split(":").collect();
+                if split.len() >= 2 {
+                    match split[0] {
+                        "Pid" => pid = split[1].trim().parse().unwrap_or_default(),
+                        "PPid" => ppid = split[1].trim().parse().unwrap_or_default(),
+                        "Name" => name.push_str(split[1].trim()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if let Ok(mut file) = File::open(format!("/proc/{}/cmdline", pid)) {
+            file.read_to_string(&mut cmdline).unwrap_or_default();
+            cmdline = cmdline.replace('\0', "");
+        }
+        Self {
+            pid,
+            ppid,
+            name,
+            cmdline,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -74,40 +120,8 @@ pub fn get_running_processes() -> Result<Vec<ProcessInfo>> {
         if entry.file_type()?.is_dir() {
             if let Some(pid_str) = entry.file_name().to_str() {
                 if pid_str.chars().all(|c| c.is_ascii_digit()) {
-                    let mut cmdline = String::new();
-                    if let Ok(mut file) = File::open(format!("/proc/{}/cmdline", pid_str)) {
-                        file.read_to_string(&mut cmdline)?;
-                        cmdline = cmdline.replace('\0', " ");
-                    }
-
-                    if let Ok(file) = File::open(format!("/proc/{}/status", pid_str)) {
-                        let reader = BufReader::new(file);
-
-                        let mut name = String::new();
-                        let mut pid = 0u32;
-                        let mut ppid = 0u32;
-
-                        for line in reader.lines() {
-                            let line = line?;
-                            let split: Vec<&str> = line.split(':').collect();
-
-                            if split.len() >= 2 {
-                                match split[0] {
-                                    "Name" => name = split[1].trim().to_string(),
-                                    "Pid" => pid = split[1].trim().parse()?,
-                                    "PPid" => ppid = split[1].trim().parse()?,
-                                    _ => {}
-                                }
-                            }
-                        }
-
-                        process_info.push(ProcessInfo {
-                            pid,
-                            ppid,
-                            name,
-                            cmdline,
-                        });
-                    }
+                    let info = ProcessInfo::get_process_info_from_pid(pid_str.parse()?);
+                    process_info.push(info);
                 }
             }
         }
@@ -116,13 +130,15 @@ pub fn get_running_processes() -> Result<Vec<ProcessInfo>> {
     Ok(process_info)
 }
 
-pub fn track_process_exec() -> Result<Vec<ProcessEvent>> {
-    let proc_info = get_running_processes()?;
-    let mut proc_ev: Vec<ProcessEvent> = Vec::new();
+pub fn track_process_exec(ring_buf: &mut RingBuf<&mut MapData>) -> Result<Option<ProcessEvent>> {
+    let mut p_event: Option<ProcessEvent> = None;
 
-    for process in proc_info {
+    if let Some(data) = ring_buf.next() {
+        let event = unsafe { read(data.as_ptr() as *const ExecEvent) };
+        let proc_info = ProcessInfo::get_process_info_from_pid(event.pid);
+
         let mut uid = 0u32;
-        if let Ok(mut file) = File::open(format!("/proc/{}/status", process.pid)) {
+        if let Ok(mut file) = File::open(format!("/proc/{}/status", event.pid)) {
             let reader = BufReader::new(file);
 
             for line in reader.lines() {
@@ -134,26 +150,26 @@ pub fn track_process_exec() -> Result<Vec<ProcessEvent>> {
                             uid = s.parse()?;
                         }
                     }
-
                     _ => {}
                 }
             }
         }
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        proc_ev.push(ProcessEvent {
-            info: process,
+
+        p_event = Some(ProcessEvent {
+            info: proc_info,
             uid: uid,
-            timestamp,
-        });
+            timestamp: event.timestamp,
+        })
     }
-    println!("{proc_ev:#?}");
-    Ok(proc_ev)
+
+    Ok(p_event)
 }
 
 fn track_process_exit() -> Vec<ProcessExitEvent> {
     todo!()
 }
 
+// have to capture exit as well
 fn track_file_open() -> Vec<FileEvent> {
     todo!()
 }
