@@ -6,6 +6,12 @@ pub struct ExecEvent {
     pub timestamp: u64,
     pub filename: [u8; 256],
 }
+impl ExecEvent {
+    // change this later..
+    pub fn get_file_name(file_name: &[u8; 256]) -> String {
+        str::from_utf8(file_name).unwrap_or_default().to_string()
+    }
+}
 
 #[repr(C)]
 #[derive(Debug)]
