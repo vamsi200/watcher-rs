@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 
 build_ebpf() {
-  cargo +nightly build \
+  RUSTFLAGS=-Awarnings cargo +nightly build \
     -Z build-std=core \
     --target bpfel-unknown-none \
     --release \
@@ -18,7 +18,7 @@ run_userspace() {
 }
 
 main() {
-  echo "[INFO] Building and program..."
+  echo "[INFO] Building and running program..."
   build_ebpf
   run_userspace
 }

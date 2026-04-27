@@ -18,8 +18,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use std::{ptr::read, thread::sleep};
+use watcher_rs_common::EventHeader;
 use watcher_rs_common::ExecEvent;
+use watcher_rs_common::FileCloseEvent;
+use watcher_rs_common::FileEvent;
 use watcher_rs_common::NetworkEvent;
+use watcher_rs_common::ProcessExitEvent;
 
 // like a snapshot
 #[derive(Debug)]
@@ -72,21 +76,6 @@ pub struct ProcessEvent {
     info: ProcessInfo,
     uid: u32,
     timestamp: u64,
-}
-
-pub struct ProcessExitEvent {
-    pid: u32,
-    timestamp: u64,
-}
-
-pub struct FileEvent {
-    pub pid: u32,
-    pub uid: u32,
-    pub dir_fd: i32,
-    pub filename: [u8; 256],
-    pub mode: i32,
-    pub flags: i32,
-    pub timestamp: u64,
 }
 
 struct PrivilegeEvent {
@@ -168,17 +157,32 @@ pub fn track_process_exec(ring_buf: &mut RingBuf<&mut MapData>) -> Result<Option
     Ok(p_event)
 }
 
-fn track_process_exit() -> Vec<ProcessExitEvent> {
-    todo!()
+#[derive(Debug)]
+pub enum Event {
+    ProcessExec(ExecEvent),
+    ProcessExit(ProcessExitEvent),
+    FileOpen(FileEvent),
+    FileClose(FileCloseEvent),
+    Network(NetworkEvent),
+    Unknown(u32),
 }
 
-// have to capture exit as well
-fn track_file_open() -> Vec<FileEvent> {
-    todo!()
-}
+pub fn ret_event(ring_buf: &mut RingBuf<&mut MapData>) -> Option<Event> {
+    let data = ring_buf.next()?;
+    let ptr = data.as_ptr();
 
-fn track_network_connect() -> Vec<NetworkEvent> {
-    todo!()
+    let header = unsafe { read(ptr as *const EventHeader) };
+
+    let event = match header.kind {
+        0 => Event::ProcessExec(unsafe { read(ptr as *const ExecEvent) }),
+        1 => Event::ProcessExit(unsafe { read(ptr as *const ProcessExitEvent) }),
+        2 => Event::FileOpen(unsafe { read(ptr as *const FileEvent) }),
+        3 => Event::FileClose(unsafe { read(ptr as *const FileCloseEvent) }),
+        4 => Event::Network(unsafe { read(ptr as *const NetworkEvent) }),
+        k => Event::Unknown(k),
+    };
+
+    Some(event)
 }
 
 // TODO: Test and refine the approach

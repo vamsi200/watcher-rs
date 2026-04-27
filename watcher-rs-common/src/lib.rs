@@ -1,21 +1,34 @@
+#![no_std]
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct ExecEvent {
+    pub kind: u32,
     pub pid: u32,
     pub uid: u32,
     pub timestamp: u64,
     pub filename: [u8; 256],
 }
-impl ExecEvent {
-    // change this later..
-    pub fn get_file_name(file_name: &[u8; 256]) -> String {
-        str::from_utf8(file_name).unwrap_or_default().to_string()
-    }
+
+#[repr(u32)]
+#[derive(Debug)]
+pub enum EventType {
+    ExecEvent = 0,
+    ExecExit = 1,
+    FileOpen = 2,
+    FileClose = 3,
+    Network = 4,
+}
+
+#[repr(C)]
+pub struct EventHeader {
+    pub kind: u32,
 }
 
 #[repr(C)]
 #[derive(Debug)]
 pub struct FileEvent {
+    pub kind: u32,
     pub pid: u32,
     pub uid: u32,
     pub dir_fd: i32,
@@ -46,10 +59,28 @@ pub struct SockaddrIn6 {
 #[repr(C)]
 #[derive(Debug)]
 pub struct NetworkEvent {
+    pub kind: u32,
     pub pid: u32,
     pub sockfd: i32,
     pub family: u16,
     pub port: u16,
     pub addr: [u8; 16],
+    pub timestamp: u64,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct ProcessExitEvent {
+    pub kind: u32,
+    pub pid: u32,
+    pub timestamp: u64,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct FileCloseEvent {
+    pub kind: u32,
+    pub file_name: [u8; 256],
+    pub pid: u32,
     pub timestamp: u64,
 }
