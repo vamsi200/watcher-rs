@@ -1,5 +1,4 @@
 #![allow(unused)]
-use crate::helper::{is_root_only_path, parse_addr, parse_filename};
 use anyhow::Error;
 use anyhow::Result;
 use aya::{
@@ -18,89 +17,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use std::{ptr::read, thread::sleep};
-use watcher_rs_common::EventHeader;
-use watcher_rs_common::ExecEvent;
-use watcher_rs_common::FileCloseEvent;
-use watcher_rs_common::FileEvent;
-use watcher_rs_common::NetworkEvent;
-use watcher_rs_common::ProcessExitEvent;
-
-// like a snapshot
-#[derive(Debug)]
-pub struct ProcessInfo {
-    pid: u32,
-    ppid: u32,
-    name: String,
-    cmdline: String,
-}
-
-impl ProcessInfo {
-    pub fn get_process_info_from_pid(i_pid: u32) -> Self {
-        let mut cmdline = String::new();
-        let mut ppid = 0u32;
-        let mut pid = 0u32;
-        let mut name = String::new();
-
-        if let Ok(file) = File::open(format!("/proc/{}/status", i_pid)) {
-            let mut reader = BufReader::new(file);
-            for line in reader.lines() {
-                let line = line.unwrap_or_default();
-                let split: Vec<&str> = line.trim().split(":").collect();
-                if split.len() >= 2 {
-                    match split[0] {
-                        "Pid" => pid = split[1].trim().parse().unwrap_or_default(),
-                        "PPid" => ppid = split[1].trim().parse().unwrap_or_default(),
-                        "Name" => name.push_str(split[1].trim()),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        if let Ok(mut file) = File::open(format!("/proc/{}/cmdline", pid)) {
-            file.read_to_string(&mut cmdline).unwrap_or_default();
-            cmdline = cmdline.replace('\0', "");
-        }
-
-        Self {
-            pid,
-            ppid,
-            name,
-            cmdline,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct ProcessEvent {
-    info: ProcessInfo,
-    uid: u32,
-    timestamp: u64,
-}
-
-struct PrivilegeEvent {
-    pid: u32,
-    uid: u32,
-    binary: PathBuf,
-    is_setuid: bool,
-    timestamp: u64,
-}
-
-#[derive(Debug)]
-pub struct SuspiciousEvent {
-    pid: u32,
-    file: String,
-    reason: String,
-    severity: Severity,
-    timestamp: u64,
-}
-
-#[derive(Debug)]
-enum Severity {
-    Low,
-    Medium,
-    High,
-}
+use watcher_rs_common::helper::{bytes_to_str, is_root_only_path, parse_addr};
+use watcher_rs_common::*;
 
 pub fn get_running_processes() -> Result<Vec<ProcessInfo>> {
     let read_dir = fs::read_dir("/proc/")?;
@@ -291,7 +209,7 @@ pub fn detect_suspicious_file_access(events: &[FileEvent]) -> Vec<SuspiciousEven
     let mut pid_access_counts: HashMap<u32, (usize, u64)> = HashMap::new();
 
     for event in events {
-        let filename = parse_filename(&event.filename);
+        let filename = bytes_to_str(&event.filename);
 
         if let Some(matched_path) = SENSITIVE_PATHS.iter().find(|&&p| filename.starts_with(p)) {
             let severity = if matches!(*matched_path, "/etc/shadow" | "/.ssh/" | "/etc/sudoers") {
@@ -421,9 +339,11 @@ pub fn detect_suspicious_network(
                 event.port, description
             ),
             severity: match sev {
+                Severity::Critical => Severity::Critical,
                 Severity::High => Severity::High,
                 Severity::Medium => Severity::Medium,
                 Severity::Low => Severity::Low,
+                Severity::Info => Severity::Info,
             },
             timestamp: event.timestamp,
         });
@@ -510,7 +430,7 @@ pub fn detect_input_device_access(events: &[FileEvent]) -> Vec<SuspiciousEvent> 
     let mut pid_devices_seen: HashMap<u32, HashSet<String>> = HashMap::new();
 
     for event in events {
-        let filename = parse_filename(&event.filename);
+        let filename = bytes_to_str(&event.filename);
 
         let device_match = INPUT_DEVICE_PATHS
             .iter()
@@ -525,9 +445,11 @@ pub fn detect_input_device_access(events: &[FileEvent]) -> Vec<SuspiciousEvent> 
             file: filename.clone(),
             reason: description.to_string(),
             severity: match sev {
+                Severity::Critical => Severity::Critical,
                 Severity::High => Severity::High,
                 Severity::Medium => Severity::Medium,
                 Severity::Low => Severity::Low,
+                Severity::Info => Severity::Info,
             },
             timestamp: event.timestamp,
         });

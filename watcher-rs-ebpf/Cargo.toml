@@ -7,3 +7,4 @@ edition = "2024"
 aya-ebpf = "0.1.1"
 aya-ebpf-macros = "0.1.2"
 aya-log-ebpf = "0.1.0"
+watcher-rs-common = { path = "../watcher-rs-common/"}

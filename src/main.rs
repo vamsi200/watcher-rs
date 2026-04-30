@@ -16,8 +16,7 @@ use aya::{
 use aya_log::EbpfLogger;
 use tokio::io::unix::AsyncFd;
 use watcher_rs::parser::{
-    self, Event, ProcessInfo, detect_suspicious_network, get_running_processes, ret_event,
-    track_process_exec,
+    self, Event, detect_suspicious_network, get_running_processes, ret_event, track_process_exec,
 };
 use watcher_rs_common::{ExecEvent, FileEvent, NetworkEvent, SockAddrIn};
 
@@ -88,7 +87,7 @@ async fn main() -> Result<(), Error> {
                         println!("net: pid={}", e.pid);
                     }
                 }
-                Event::Unknown(k) => println!("unknown kind={}", k),
+                Event::Unknown(k) => panic!("unknown kind={}", k),
             }
         }
 
