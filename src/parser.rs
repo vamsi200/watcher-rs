@@ -1,4 +1,6 @@
 #![allow(unused)]
+use crate::helper::{bytes_to_str, is_root_only_path, parse_addr};
+use crate::*;
 use anyhow::Error;
 use anyhow::Result;
 use aya::{
@@ -17,7 +19,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use std::{ptr::read, thread::sleep};
-use watcher_rs_common::helper::{bytes_to_str, is_root_only_path, parse_addr};
 use watcher_rs_common::*;
 
 pub fn get_running_processes() -> Result<Vec<ProcessInfo>> {
@@ -85,19 +86,19 @@ pub enum Event {
     Unknown(u32),
 }
 
-pub fn ret_event(ring_buf: &mut RingBuf<&mut MapData>) -> Option<Event> {
+pub fn ret_event(ring_buf: &mut RingBuf<&mut MapData>) -> Option<AppEvent> {
     let data = ring_buf.next()?;
     let ptr = data.as_ptr();
 
     let header = unsafe { read(ptr as *const EventHeader) };
 
     let event = match header.kind {
-        0 => Event::ProcessExec(unsafe { read(ptr as *const ExecEvent) }),
-        1 => Event::ProcessExit(unsafe { read(ptr as *const ProcessExitEvent) }),
-        2 => Event::FileOpen(unsafe { read(ptr as *const FileEvent) }),
-        3 => Event::FileClose(unsafe { read(ptr as *const FileCloseEvent) }),
-        4 => Event::Network(unsafe { read(ptr as *const NetworkEvent) }),
-        k => Event::Unknown(k),
+        0 => AppEvent::Exec(unsafe { read(ptr as *const ExecEvent) }),
+        1 => AppEvent::ExecExit(unsafe { read(ptr as *const ProcessExitEvent) }),
+        2 => AppEvent::File(unsafe { read(ptr as *const FileEvent) }),
+        3 => AppEvent::FileClose(unsafe { read(ptr as *const FileCloseEvent) }),
+        4 => AppEvent::Network(unsafe { read(ptr as *const NetworkEvent) }),
+        k => return None,
     };
 
     Some(event)

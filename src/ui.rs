@@ -1,12 +1,11 @@
 #![allow(unused)]
 use crate::app::App;
+use crate::*;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
-use watcher_rs_common::helper::*;
-use watcher_rs_common::{AppEvent, Severity};
 
 const C_BG: Color = Color::Rgb(13, 17, 23); // #0d1117
 const C_BG2: Color = Color::Rgb(22, 27, 34); // #161b22
@@ -39,7 +38,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
-            Constraint::Min(0),    // main part brah
+            Constraint::Min(0),    // main part
             Constraint::Length(1), // below stats bar.. should I keep it??
         ])
         .split(area);
@@ -59,16 +58,22 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
 
     render_side_bar(frame, app, chunks[0]);
     render_stream(frame, app, chunks[1]);
-    // render_detail_side_bar(frame, app, chunks[2]);
+    render_detail_side_bar(frame, app, chunks[2]);
 }
 
 fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
+    let bg = if app.selected_tab == crate::app::Focus::Stream {
+        C_BLUE
+    } else {
+        C_BG2
+    };
+
     let block = Block::default()
         .title("stream baby")
         .title_style(Style::default().fg(C_TEXT))
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(C_BLUE))
+        .border_style(Style::default().fg(bg))
         .style(Style::default().bg(C_BG));
 
     let inner = block.inner(area);
@@ -105,7 +110,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut items: Vec<ListItem> = Vec::new();
     let bg = C_BG3;
 
-    for event in &app.events {
+    if let Some(event) = &app.events {
         let sev = event.severity();
 
         let sev_col = sev_color(&sev);
@@ -136,6 +141,9 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
 
         items.push(ListItem::new(line));
     }
+
+    let list = List::new(items).style(Style::default().bg(C_BG));
+    frame.render_widget(list, area);
 }
 
 fn detail_color(event: &AppEvent) -> Color {
@@ -156,11 +164,18 @@ pub const SEVERITY_FILTERS: &[(Severity, &str); 5] = &[
 ];
 
 fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+    let bg = if app.selected_tab == crate::app::Focus::Sidebar {
+        C_BLUE
+    } else {
+        C_BG2
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Plain)
-        .border_style(Style::default().fg(C_BORDER))
+        .border_style(Style::default().fg(bg))
         .style(Style::default().bg(C_BG2));
+
     let inner_part = block.inner(area);
     frame.render_widget(block, area);
 
@@ -206,13 +221,20 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_detail_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+    let bg = if app.selected_tab == crate::app::Focus::Detail {
+        C_BLUE
+    } else {
+        C_BG2
+    };
+
     let block = Block::default()
         .title(" detail ")
         .title_style(Style::default().fg(C_TEXT))
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(C_BG3))
+        .border_style(Style::default().fg(bg))
         .style(Style::default().bg(C_BG));
+
     let inner = block.inner(area);
     frame.render_widget(block, area);
 }

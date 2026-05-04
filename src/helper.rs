@@ -84,19 +84,20 @@ pub fn is_root_only_path(filename: &str) -> bool {
     ROOT_ONLY.iter().any(|&p| filename.starts_with(p))
 }
 
-pub fn parse_uptime() -> anyhow::Result<String> {
-    let mut file = File::open("/proc/uptime")?;
+pub fn parse_uptime() -> String {
+    let mut file = File::open("/proc/uptime").unwrap();
     let mut buf = String::new();
-    file.read_to_string(&mut buf)?;
+    file.read_to_string(&mut buf).unwrap();
     let uptime_secs = buf
         .split('.')
         .next()
         .expect("Failed to parse uptime")
-        .parse::<u64>()?;
+        .parse::<u64>()
+        .unwrap();
 
     let hours = uptime_secs / 3600;
     let minutes = uptime_secs % 3600 / 60;
     let secs = uptime_secs % 60;
     let out_string = format!("{hours}:{minutes}:{secs}");
-    Ok(out_string)
+    out_string
 }

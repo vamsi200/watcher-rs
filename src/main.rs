@@ -1,4 +1,12 @@
 #![allow(unused)]
+use anyhow::Error;
+use aya::{
+    Btf, Ebpf, include_bytes_aligned,
+    maps::{Array, MapData, RingBuf},
+    programs::{FEntry, TracePoint},
+};
+use aya_log::EbpfLogger;
+use ratatui::restore;
 use std::{
     collections::{HashMap, HashSet},
     net::{Ipv4Addr, Ipv6Addr},
@@ -6,22 +14,45 @@ use std::{
     thread::sleep,
     time::Duration,
 };
-
-use anyhow::Error;
-use aya::{
-    Btf, Ebpf, include_bytes_aligned,
-    maps::{Array, RingBuf},
-    programs::{FEntry, TracePoint},
-};
-use aya_log::EbpfLogger;
-use tokio::io::unix::AsyncFd;
+use tokio::{io::unix::AsyncFd, sync::mpsc::UnboundedSender};
+use watcher_rs::app::App;
 use watcher_rs::parser::{
     self, Event, detect_suspicious_network, get_running_processes, ret_event, track_process_exec,
 };
-use watcher_rs_common::{ExecEvent, FileEvent, NetworkEvent, SockAddrIn};
+use watcher_rs::*;
+use watcher_rs_common::*;
+
+async fn read_events(buf: RingBuf<MapData>, tx: UnboundedSender<AppEvent>) -> anyhow::Result<()> {
+    let mut asyncfd = AsyncFd::new(buf)?;
+    loop {
+        let mut guard = asyncfd.readable_mut().await?;
+        let ring_buf = guard.get_inner_mut();
+
+        while let Some(data) = ring_buf.next() {
+            let ptr = data.as_ptr();
+            let header = unsafe { read(ptr as *const EventHeader) };
+
+            let event = match header.kind {
+                0 => AppEvent::Exec(unsafe { read(ptr as *const ExecEvent) }),
+                1 => AppEvent::ExecExit(unsafe { read(ptr as *const ProcessExitEvent) }),
+                2 => AppEvent::File(unsafe { read(ptr as *const FileEvent) }),
+                3 => AppEvent::FileClose(unsafe { read(ptr as *const FileCloseEvent) }),
+                4 => AppEvent::Network(unsafe { read(ptr as *const NetworkEvent) }),
+                k => return Ok(()),
+            };
+
+            if tx.send(event).is_err() {
+                return Ok(());
+            }
+        }
+        guard.clear_ready();
+    }
+
+    Ok(())
+}
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> color_eyre::Result<()> {
     env_logger::init();
     let mut bpf = Ebpf::load(include_bytes_aligned!(
         "../watcher-rs-ebpf/target/bpfel-unknown-none/release/watcher-rs-ebpf"
@@ -49,54 +80,28 @@ async fn main() -> Result<(), Error> {
     prog.load("filp_close", &btf)?;
     prog.attach()?;
 
-    let mut ring_buf_map = bpf.take_map("EVENTS").unwrap();
+    let mut ring_buf = RingBuf::try_from(bpf.take_map("EVENTS").unwrap())?;
     let dropped_ev_map = bpf.take_map("DROPPED").unwrap();
-
-    let mut ring_buf = RingBuf::try_from(&mut ring_buf_map)?;
-    let mut dropped_ev = Array::try_from(dropped_ev_map)?;
 
     const AF_INET: u16 = 2;
     const AF_INET6: u16 = 10;
     // let mut pid_conn_counts: HashMap<u32, (usize, u64)> = HashMap::new();
     // let mut pid_ports_seen: HashMap<u32, HashSet<u16>> = HashMap::new();
     let mut seen_pid: HashSet<u32> = HashSet::new();
-    loop {
-        while let Some(event) = ret_event(&mut ring_buf) {
-            match event {
-                Event::ProcessExec(e) => {
-                    if seen_pid.insert(e.pid) {
-                        println!("exec: pid={}", e.pid);
-                    }
-                }
-                Event::ProcessExit(e) => {
-                    seen_pid.remove(&e.pid);
-                    println!("exit: pid={}", e.pid);
-                }
-                Event::FileOpen(e) => {
-                    if seen_pid.insert(e.pid) {
-                        println!("open: pid={}", e.pid);
-                    }
-                }
-                Event::FileClose(e) => {
-                    if seen_pid.insert(e.pid) {
-                        println!("close: pid={}", e.pid);
-                    }
-                }
-                Event::Network(e) => {
-                    if seen_pid.insert(e.pid) {
-                        println!("net: pid={}", e.pid);
-                    }
-                }
-                Event::Unknown(k) => panic!("unknown kind={}", k),
-            }
-        }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
 
-        let dropped = dropped_ev.get(&0, 0).unwrap_or(0);
-        if dropped > 0 {
-            eprintln!("some events dropped brah: {}", dropped);
-            dropped_ev.set(0, &0, 0)?;
+    tokio::spawn(async move {
+        if let Err(e) = read_events(ring_buf, tx).await {
+            eprintln!("err: {e}");
         }
-        sleep(Duration::from_millis(100));
-    }
+    });
+
+    color_eyre::install()?;
+    let terminal = ratatui::init();
+    let mut app = App::new();
+
+    app.run(terminal, rx)?;
+    restore();
+
     Ok(())
 }
