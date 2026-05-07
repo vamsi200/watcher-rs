@@ -64,9 +64,9 @@ async fn main() -> color_eyre::Result<()> {
     prog.load()?;
     prog.attach("syscalls", "sys_enter_execve")?;
 
-    let prog: &mut TracePoint = bpf.program_mut("sys_enter_openat").unwrap().try_into()?;
-    prog.load()?;
-    prog.attach("syscalls", "sys_enter_openat")?;
+    // let prog: &mut TracePoint = bpf.program_mut("sys_enter_openat").unwrap().try_into()?;
+    // prog.load()?;
+    // prog.attach("syscalls", "sys_enter_openat")?;
 
     let prog: &mut TracePoint = bpf.program_mut("sched_process_exit").unwrap().try_into()?;
     prog.load()?;
@@ -76,9 +76,9 @@ async fn main() -> color_eyre::Result<()> {
     prog.load()?;
     prog.attach("syscalls", "sys_enter_connect")?;
 
-    let prog: &mut FEntry = bpf.program_mut("filp_close").unwrap().try_into()?;
-    prog.load("filp_close", &btf)?;
-    prog.attach()?;
+    // let prog: &mut FEntry = bpf.program_mut("filp_close").unwrap().try_into()?;
+    // prog.load("filp_close", &btf)?;
+    // prog.attach()?;
 
     let mut ring_buf = RingBuf::try_from(bpf.take_map("EVENTS").unwrap())?;
     let dropped_ev_map = bpf.take_map("DROPPED").unwrap();
@@ -99,7 +99,6 @@ async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let terminal = ratatui::init();
     let mut app = App::new();
-
     app.run(terminal, rx)?;
     restore();
 

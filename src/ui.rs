@@ -2,10 +2,13 @@
 use crate::app::App;
 use crate::*;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{
+    Block, BorderType, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 
 const C_BG: Color = Color::Rgb(13, 17, 23); // #0d1117
 const C_BG2: Color = Color::Rgb(22, 27, 34); // #161b22
@@ -62,22 +65,25 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
-    let bg = if app.selected_tab == crate::app::Focus::Stream {
-        C_BLUE
+    let title = if app.searching {
+        format!(" search: {} ", app.search_query)
+    } else if !app.search_query.is_empty() {
+        format!(" stream  [filter: {}] ", app.search_query)
     } else {
-        C_BG2
+        " stream ".to_string()
     };
 
     let block = Block::default()
-        .title("stream baby")
+        .title(title)
         .title_style(Style::default().fg(C_TEXT))
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(bg))
+        .border_style(Style::default().fg(C_BLUE))
         .style(Style::default().bg(C_BG));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
     let header_area = Rect {
         x: inner.x,
         y: inner.y,
@@ -89,6 +95,12 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         y: inner.y + 1,
         width: inner.width,
         height: inner.height.saturating_sub(1),
+    };
+
+    let bg = if app.selected_tab == crate::app::Focus::Stream {
+        C_BLUE
+    } else {
+        C_BG2
     };
 
     let line = Line::from(vec![
@@ -107,17 +119,37 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         header_area,
     );
 
+    let selected = app.selected;
+    let height = list_area.height as usize;
+    if height == 0 {
+        return;
+    }
+    let scroll_top = if selected >= height {
+        selected - height + 1
+    } else {
+        0
+    };
+
+    let visible_events = app
+        .filtered_events
+        .iter()
+        .enumerate()
+        .skip(scroll_top)
+        .take(height);
+
     let mut items: Vec<ListItem> = Vec::new();
-    let bg = C_BG3;
 
-    if let Some(event) = &app.events {
+    for (i, ev_idx) in visible_events {
+        let event: &AppEvent = &app.events[*ev_idx];
         let sev = event.severity();
-
+        let is_sel = i == selected;
         let sev_col = sev_color(&sev);
         let ts = format_timestamp_ns(event.timestamp());
         let pid = event.pid();
         let kind = event.kind_label();
         let detail = event.detail();
+        let border_char = if is_sel { "▶" } else { " " };
+        let bg = if is_sel { C_BG3 } else { C_BG };
 
         let line = Line::from(vec![
             Span::styled(
@@ -125,7 +157,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(C_MUTED).bg(bg),
             ),
             Span::styled(
-                format!("{:<4} ", sev.label()),
+                format!("{:<6} ", sev.label()),
                 Style::default()
                     .fg(sev_col)
                     .bg(bg)
@@ -142,8 +174,36 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         items.push(ListItem::new(line));
     }
 
+    while items.len() < height {
+        items.push(ListItem::new(Line::from("")));
+    }
     let list = List::new(items).style(Style::default().bg(C_BG));
-    frame.render_widget(list, area);
+    frame.render_widget(list, list_area);
+
+    let total = app.filtered_events.len();
+    render_scrollbar(frame, area, app.selected, total);
+}
+
+fn render_scrollbar(frame: &mut Frame, area: Rect, selected: usize, total: usize) {
+    let h = area.height as usize;
+    let pos = (selected * h) / total.max(1);
+    let x = area.x + area.width - 1;
+
+    for row in 0..h {
+        let ch = if row == pos { "█" } else { "░" };
+        let style = if row == pos {
+            Style::default().fg(C_BLUE)
+        } else {
+            Style::default().fg(C_BORDER)
+        };
+        let cell_area = Rect {
+            x,
+            y: area.y + row as u16,
+            width: 1,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(ch).style(style), cell_area);
+    }
 }
 
 fn detail_color(event: &AppEvent) -> Color {
@@ -237,6 +297,185 @@ fn render_detail_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    let event = match app.selected_event() {
+        Some(s) => s,
+        None => {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "\n  no event selected",
+                    Style::default().fg(C_MUTED),
+                )),
+                inner,
+            );
+            return;
+        }
+    };
+
+    let lines = build_detail_lines(event);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().bg(C_BG)),
+        inner,
+    );
+}
+
+fn section(lines: &mut Vec<Line<'static>>, title: &'static str) {
+    lines.push(Line::from(vec![Span::styled(
+        title,
+        Style::default().fg(C_BLUE).add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(Span::styled(
+        "─".repeat(title.len()),
+        Style::default().fg(C_BORDER),
+    )));
+}
+
+fn kv(lines: &mut Vec<Line<'static>>, key: &'static str, val: &str, color: Color) {
+    lines.push(Line::from(vec![
+        Span::styled(format!("{:<8}", key), Style::default().fg(C_MUTED)),
+        Span::styled(val.to_string(), Style::default().fg(color)),
+    ]));
+}
+
+fn uid_label(uid: u32) -> String {
+    match uid {
+        0 => "0 (root)".into(),
+        _ => uid.to_string(),
+    }
+}
+fn uid_color(uid: u32) -> Color {
+    if uid == 0 { C_RED } else { C_TEXT }
+}
+fn port_color(port: u16) -> Color {
+    match port {
+        22 | 443 | 80 => C_GREEN,
+        4444 | 1337 => C_RED, // lol
+        _ => C_TEXT,
+    }
+}
+fn family_label(family: u16) -> &'static str {
+    match family {
+        2 => "AF_INET",
+        10 => "AF_INET6",
+        _ => "unknown",
+    }
+}
+
+fn build_detail_lines(event: &AppEvent) -> Text<'static> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let sev = event.severity();
+    let sev_col = sev_color(&sev);
+    lines.push(Line::from(vec![
+        Span::styled(
+            sev.label().to_string(),
+            Style::default().fg(sev_col).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            event.kind_label().trim().to_string(),
+            Style::default().fg(C_PURPLE),
+        ),
+    ]));
+    lines.push(Line::from(Span::styled(
+        format_timestamp_ns(event.timestamp()),
+        Style::default().fg(C_MUTED),
+    )));
+    lines.push(Line::from(""));
+
+    match event {
+        AppEvent::Exec(e) => {
+            section(&mut lines, "PROCESS");
+            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
+            kv(&mut lines, "uid", &uid_label(e.uid), uid_color(e.uid));
+            kv(&mut lines, "file", &bytes_to_str(&e.filename), C_PATH);
+        }
+        AppEvent::ExecExit(e) => {
+            section(&mut lines, "PROCESS");
+            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
+        }
+        AppEvent::File(e) => {
+            section(&mut lines, "PROCESS");
+            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
+            kv(&mut lines, "uid", &uid_label(e.uid), uid_color(e.uid));
+            lines.push(Line::from(""));
+            section(&mut lines, "FILE");
+            let op = flags_to_op(e.flags);
+            let path = bytes_to_str(&e.filename);
+            let path_col = if crate::helper::is_sensitive_path(&path) {
+                C_RED
+            } else {
+                C_PATH
+            };
+            kv(&mut lines, "path", &path, path_col);
+            kv(&mut lines, "op", op, C_TEXT);
+            kv(&mut lines, "flags", &format!("{:#010x}", e.flags), C_MUTED);
+            kv(&mut lines, "mode", &format!("{:04o}", e.mode), C_MUTED);
+            kv(&mut lines, "dir_fd", &e.dir_fd.to_string(), C_MUTED);
+        }
+        AppEvent::FileClose(e) => {
+            section(&mut lines, "FILE");
+            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
+            kv(&mut lines, "path", &bytes_to_str(&e.file_name), C_PATH);
+        }
+        AppEvent::Network(e) => {
+            let addr = helper::parse_addr(e.family, &e.addr);
+            section(&mut lines, "PROCESS");
+            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
+            lines.push(Line::from(""));
+            section(&mut lines, "NETWORK");
+            kv(&mut lines, "dst", &addr, C_BLUE);
+            kv(&mut lines, "port", &e.port.to_string(), port_color(e.port));
+            kv(&mut lines, "family", &family_label(e.family), C_MUTED);
+            kv(&mut lines, "sockfd", &e.sockfd.to_string(), C_MUTED);
+        }
+        AppEvent::Process(e) => {
+            section(&mut lines, "PROCESS");
+            kv(&mut lines, "name", &e.info.name, C_TEXT);
+            kv(&mut lines, "pid", &e.info.pid.to_string(), C_TEXT);
+            kv(&mut lines, "ppid", &e.info.ppid.to_string(), C_MUTED);
+            kv(&mut lines, "uid", &uid_label(e.uid), uid_color(e.uid));
+            lines.push(Line::from(""));
+            section(&mut lines, "CMDLINE");
+            lines.push(Line::from(Span::styled(
+                e.info.cmdline.clone(),
+                Style::default().fg(C_PATH),
+            )));
+        }
+        AppEvent::Privilege(e) => {
+            section(&mut lines, "PROCESS");
+            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
+            kv(&mut lines, "uid", &uid_label(e.uid), uid_color(e.uid));
+            lines.push(Line::from(""));
+            section(&mut lines, "PRIVILEGE");
+            kv(
+                &mut lines,
+                "binary",
+                &e.binary.display().to_string(),
+                C_PATH,
+            );
+            kv(
+                &mut lines,
+                "setuid",
+                &e.is_setuid.to_string(),
+                if e.is_setuid { C_RED } else { C_MUTED },
+            );
+        }
+        AppEvent::Suspicious(e) => {
+            section(&mut lines, "SUSPICIOUS");
+            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
+            kv(&mut lines, "file", &e.file, C_PATH);
+            lines.push(Line::from(""));
+            section(&mut lines, "REASON");
+            lines.push(Line::from(Span::styled(
+                e.reason.clone(),
+                Style::default().fg(C_RED),
+            )));
+        }
+    }
+
+    Text::from(lines)
 }
 
 // should I make this a popup?? coule be annoying..
