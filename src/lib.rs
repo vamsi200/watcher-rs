@@ -8,9 +8,9 @@ use std::fs::File;
 use std::io::Read;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-
 use watcher_rs_common::*;
-#[derive(Debug, Clone)]
+
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct ProcessInfo {
     pub pid: u32,
     pub ppid: u32,
@@ -55,14 +55,14 @@ impl ProcessInfo {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct ProcessEvent {
     pub info: ProcessInfo,
     pub uid: u32,
     pub timestamp: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct PrivilegeEvent {
     pub pid: u32,
     pub uid: u32,
@@ -71,7 +71,7 @@ pub struct PrivilegeEvent {
     pub timestamp: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct SuspiciousEvent {
     pub pid: u32,
     pub file: String,
@@ -80,7 +80,7 @@ pub struct SuspiciousEvent {
     pub timestamp: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Severity {
     Info,
     Low,
@@ -100,7 +100,7 @@ impl Severity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum AppEvent {
     Exec(ExecEvent),
     ExecExit(ProcessExitEvent),
@@ -113,6 +113,21 @@ pub enum AppEvent {
 }
 
 impl AppEvent {
+    pub fn matches_filter(&self, filter: &str) -> bool {
+        match filter {
+            "All" => true,
+            "ExecEvent" => matches!(self, AppEvent::Exec(_)),
+            "ExecExitEvent" => matches!(self, AppEvent::ExecExit(_)),
+            "FileEvent" => matches!(self, AppEvent::File(_)),
+            "FileCloseEvent" => matches!(self, AppEvent::FileClose(_)),
+            "NetworkEvent" => matches!(self, AppEvent::Network(_)),
+            "ProcessEvent" => matches!(self, AppEvent::Process(_)),
+            "PrivilegeEvent" => matches!(self, AppEvent::Privilege(_)),
+            "SuspiciousEvent" => matches!(self, AppEvent::Suspicious(_)),
+            _ => false,
+        }
+    }
+
     pub fn timestamp(&self) -> u64 {
         match self {
             AppEvent::Exec(e) => e.timestamp,

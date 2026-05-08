@@ -2,6 +2,7 @@
 use crate::AppEvent;
 use crate::Severity;
 use crate::ui::*;
+use color_eyre::config::FilterCallback;
 use crossterm::event::ModifierKeyCode;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{DefaultTerminal, widgets::ScrollbarState};
@@ -30,6 +31,9 @@ pub struct App {
     pub searching: bool,
     pub search_query: String,
     pub pause: bool,
+    pub filter_mode: bool,
+    pub event_idx: usize,
+    pub event_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +41,7 @@ pub enum Focus {
     Sidebar,
     Stream,
     Detail,
+    Filter,
 }
 
 impl Default for App {
@@ -61,9 +66,25 @@ impl Default for App {
             searching: false,
             search_query: String::new(),
             pause: false,
+            filter_mode: false,
+            event_idx: 0,
+            event_name: String::new(),
         }
     }
 }
+
+pub const FILTEREVENTS: [&str; 10] = [
+    "All",
+    "ExecEvent",
+    "ExecExit",
+    "ExecExitEvent",
+    "FileEvent",
+    "FileCloseEvent",
+    "NetworkEvent",
+    "ProcessEvent",
+    "PrivilegeEvent",
+    "SuspiciousEvent",
+];
 
 impl App {
     pub fn new() -> Self {
@@ -79,11 +100,18 @@ impl App {
             Severity::Info => self.info_ev_count += 1,
         }
 
-        self.events.push(ev);
+        if self.event_name.is_empty() {
+            self.event_name.push_str("All");
+        }
+
+        if ev.matches_filter(&self.event_name) {
+            self.events.push(ev);
+        }
         self.filtered_events.push(self.events.len() - 1);
+        self.search_events();
     }
 
-    pub fn filter_events(&mut self) {
+    pub fn search_events(&mut self) {
         self.filtered_events = self
             .events
             .iter()
@@ -91,6 +119,10 @@ impl App {
             .filter(|(x, s)| match_query(&s, &self.search_query))
             .map(|(x, _)| x)
             .collect();
+    }
+
+    pub fn filter_by_events(&mut self) {
+        todo!()
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -112,12 +144,50 @@ impl App {
                 _ => {}
             }
         }
+
+        if self.filter_mode {
+            self.selected_tab = Focus::Filter;
+            match key.code {
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.event_name.clear();
+                }
+                KeyCode::Char(c) => {
+                    self.event_name.push(c);
+                }
+                KeyCode::Backspace => {
+                    self.event_name.pop();
+                }
+                KeyCode::Up => {
+                    if self.event_idx > 0 {
+                        self.event_idx -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if self.event_idx + 1 < FILTEREVENTS.len() {
+                        self.event_idx += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let fv = FILTEREVENTS.get(self.event_idx).unwrap_or(&"All");
+                    self.event_name.clear();
+                    self.event_name.push_str(*fv);
+                    self.filter_mode = false;
+                }
+                KeyCode::Esc => {
+                    self.filter_mode = false;
+                }
+
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Tab => {
                 self.selected_tab = match self.selected_tab {
                     Focus::Sidebar => Focus::Stream,
                     Focus::Stream => Focus::Detail,
                     Focus::Detail => Focus::Sidebar,
+                    _ => Focus::Stream,
                 }
             }
             KeyCode::Up => {
@@ -132,11 +202,20 @@ impl App {
             }
 
             KeyCode::Char('q') => self.running = false,
-            KeyCode::Char('/') | KeyCode::Char('f') => {
+            KeyCode::Char('/') => {
                 self.searching = true;
                 self.search_query.clear();
             }
+            KeyCode::Char('f') => {
+                self.filter_mode = true;
+            }
             KeyCode::Char('p') => self.pause = !self.pause,
+            _ => {}
+        }
+    }
+
+    pub fn handle_ev_key(&mut self, key: KeyEvent) {
+        match key.code {
             _ => {}
         }
     }
@@ -150,8 +229,8 @@ impl App {
         let tick_rate = Duration::from_millis(50);
 
         while self.running {
-            if !self.pause {
-                while let Ok(event) = rx.try_recv() {
+            while let Ok(event) = rx.try_recv() {
+                if !self.pause {
                     self.push(event);
                 }
             }
@@ -189,16 +268,16 @@ impl App {
 
     pub fn search_push(&mut self, c: char) {
         self.search_query.push(c);
-        self.filter_events();
+        self.search_events();
     }
     pub fn search_pop(&mut self) {
         self.search_query.pop();
-        self.filter_events();
+        self.search_events();
     }
 
     pub fn search_clear(&mut self) {
         self.search_query.clear();
-        self.filter_events();
+        self.search_events();
     }
 
     // pub fn scroll_right(&mut self) {

@@ -1,12 +1,12 @@
 #![allow(unused)]
-use crate::app::App;
+use crate::app::{App, FILTEREVENTS};
 use crate::*;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, BorderType, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+    Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
 
@@ -62,6 +62,10 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
     render_side_bar(frame, app, chunks[0]);
     render_stream(frame, app, chunks[1]);
     render_detail_side_bar(frame, app, chunks[2]);
+
+    if app.filter_mode {
+        render_filter_popup(frame, app);
+    }
 }
 
 fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -152,12 +156,13 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         let bg = if is_sel { C_BG3 } else { C_BG };
 
         let line = Line::from(vec![
+            Span::styled(border_char, Style::default().fg(sev_col).bg(bg)),
             Span::styled(
-                format!("{:<11} ", &ts[..11.min(ts.len())]),
+                format!(" {:<11} ", &ts[..11.min(ts.len())]),
                 Style::default().fg(C_MUTED).bg(bg),
             ),
             Span::styled(
-                format!("{:<6} ", sev.label()),
+                format!("{:<4} ", sev.label()),
                 Style::default()
                     .fg(sev_col)
                     .bg(bg)
@@ -181,7 +186,10 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(list, list_area);
 
     let total = app.filtered_events.len();
-    render_scrollbar(frame, area, app.selected, total);
+
+    if total > height {
+        render_scrollbar(frame, area, app.selected, total);
+    }
 }
 
 fn render_scrollbar(frame: &mut Frame, area: Rect, selected: usize, total: usize) {
@@ -485,4 +493,43 @@ fn render_alert(frame: &mut Frame) {
 
 fn render_help_popup(frame: &mut Frame, app: &mut App) {
     todo!()
+}
+
+fn render_filter_popup(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let popup_area = {
+        let vertical =
+            Layout::vertical([Constraint::Percentage(50)]).flex(ratatui::layout::Flex::Center);
+        let horizontal =
+            Layout::horizontal([Constraint::Percentage(50)]).flex(ratatui::layout::Flex::Center);
+        let [area] = vertical.areas(area);
+        let [area] = horizontal.areas(area);
+        area
+    };
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" Filter Events ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let items: Vec<ListItem> = FILTEREVENTS
+        .iter()
+        .enumerate()
+        .map(|(idx, event)| {
+            let prefix = if idx == app.event_idx { "> " } else { "  " };
+
+            ListItem::new(Line::from(format!("{prefix}{event}")))
+        })
+        .collect();
+
+    let list = List::new(items).block(block).highlight_style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    frame.render_widget(list, popup_area);
 }
