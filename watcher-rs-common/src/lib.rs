@@ -2,7 +2,7 @@
 #![no_std]
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct ExecEvent {
     pub kind: u32,
     pub pid: u32,
@@ -27,7 +27,7 @@ pub struct EventHeader {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct FileEvent {
     pub kind: u32,
     pub pid: u32,
@@ -40,7 +40,7 @@ pub struct FileEvent {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct SockAddrIn {
     pub sin_family: u16,
     pub sin_port: u16,
@@ -58,7 +58,7 @@ pub struct SockaddrIn6 {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct NetworkEvent {
     pub kind: u32,
     pub pid: u32,
@@ -70,7 +70,7 @@ pub struct NetworkEvent {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct ProcessExitEvent {
     pub kind: u32,
     pub pid: u32,
@@ -78,7 +78,7 @@ pub struct ProcessExitEvent {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct FileCloseEvent {
     pub kind: u32,
     pub file_name: [u8; 256],

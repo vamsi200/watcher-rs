@@ -92,23 +92,23 @@ impl App {
     }
 
     pub fn push(&mut self, ev: AppEvent) {
-        match ev.severity() {
-            Severity::Critical => self.crit_ev_count += 1,
-            Severity::High => self.high_ev_count += 1,
-            Severity::Medium => self.med_ev_count += 1,
-            Severity::Low => self.low_ev_count += 1,
-            Severity::Info => self.info_ev_count += 1,
-        }
-
         if self.event_name.is_empty() {
             self.event_name.push_str("All");
         }
 
         if ev.matches_filter(&self.event_name) {
+            match ev.severity() {
+                Severity::Critical => self.crit_ev_count += 1,
+                Severity::High => self.high_ev_count += 1,
+                Severity::Medium => self.med_ev_count += 1,
+                Severity::Low => self.low_ev_count += 1,
+                Severity::Info => self.info_ev_count += 1,
+            }
+
             self.events.push(ev);
+            self.filtered_events.push(self.events.len() - 1);
+            self.search_events();
         }
-        self.filtered_events.push(self.events.len() - 1);
-        self.search_events();
     }
 
     pub fn search_events(&mut self) {
@@ -146,7 +146,6 @@ impl App {
         }
 
         if self.filter_mode {
-            self.selected_tab = Focus::Filter;
             match key.code {
                 KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.event_name.clear();
@@ -172,9 +171,11 @@ impl App {
                     self.event_name.clear();
                     self.event_name.push_str(*fv);
                     self.filter_mode = false;
+                    self.selected_tab = Focus::Stream;
                 }
                 KeyCode::Esc => {
                     self.filter_mode = false;
+                    self.selected_tab = Focus::Stream;
                 }
 
                 _ => {}
@@ -208,6 +209,7 @@ impl App {
             }
             KeyCode::Char('f') => {
                 self.filter_mode = true;
+                self.selected_tab = Focus::Filter;
             }
             KeyCode::Char('p') => self.pause = !self.pause,
             _ => {}

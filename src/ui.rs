@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::app::{App, FILTEREVENTS};
+use crate::app::{App, FILTEREVENTS, Focus};
 use crate::*;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
@@ -46,7 +46,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ])
         .split(area);
 
-    render_main(frame, app, area);
+    render_status_bar(frame, app, chunks[1]);
+
+    render_main(frame, app, chunks[0]);
 }
 
 fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -63,12 +65,18 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
     render_stream(frame, app, chunks[1]);
     render_detail_side_bar(frame, app, chunks[2]);
 
-    if app.filter_mode {
+    if app.filter_mode && !app.searching {
         render_filter_popup(frame, app);
     }
 }
 
 fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
+    let focused = if app.selected_tab == Focus::Stream {
+        C_BLUE
+    } else {
+        C_BORDER
+    };
+
     let title = if app.searching {
         format!(" search: {} ", app.search_query)
     } else if !app.search_query.is_empty() {
@@ -82,7 +90,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         .title_style(Style::default().fg(C_TEXT))
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(C_BLUE))
+        .border_style(Style::default().fg(focused))
         .style(Style::default().bg(C_BG));
 
     let inner = block.inner(area);
@@ -104,7 +112,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     let bg = if app.selected_tab == crate::app::Focus::Stream {
         C_BLUE
     } else {
-        C_BG2
+        C_BG
     };
 
     let line = Line::from(vec![
@@ -162,17 +170,20 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(C_MUTED).bg(bg),
             ),
             Span::styled(
-                format!("{:<4} ", sev.label()),
+                format!("{:<5}", sev.label()),
                 Style::default()
                     .fg(sev_col)
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("{:<5} ", pid), Style::default().fg(C_TEXT).bg(bg)),
+            Span::raw("  "),
+            Span::styled(format!("{:<6}", pid), Style::default().fg(C_TEXT).bg(bg)),
+            Span::raw("  "),
             Span::styled(
-                format!("{:<11} ", kind.trim()),
+                format!("{:<10}", kind.trim()),
                 Style::default().fg(C_PURPLE).bg(bg),
             ),
+            Span::styled(" │ ", Style::default().fg(C_BORDER).bg(bg)),
             Span::styled(detail, Style::default().fg(detail_color(event)).bg(bg)),
         ]);
 
@@ -493,6 +504,57 @@ fn render_alert(frame: &mut Frame) {
 
 fn render_help_popup(frame: &mut Frame, app: &mut App) {
     todo!()
+}
+
+fn key(s: &'static str) -> Span<'static> {
+    Span::styled(format!("[{s}]"), Style::default().fg(C_TEXT).bg(C_BG3))
+}
+
+fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+    let mode = match app.selected_tab {
+        Focus::Sidebar => "SIDEBAR",
+        Focus::Stream => "STREAM ",
+        Focus::Detail => "DETAIL ",
+        Focus::Filter => "FILTER",
+    };
+
+    let filter_label = &app.event_name;
+
+    let spans = Line::from(vec![
+        Span::styled(
+            format!(" {mode} "),
+            Style::default()
+                .fg(C_BG)
+                .bg(C_BLUE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", Style::default().bg(C_BG2)),
+        Span::styled("↑↓ nav  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        key("Tab"),
+        Span::styled(" panel  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        key("p"),
+        Span::styled(
+            if app.pause { " resume  " } else { " pause  " },
+            Style::default().fg(C_MUTED).bg(C_BG2),
+        ),
+        key("/"),
+        Span::styled(" search  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        key("f"),
+        Span::styled(" filter  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        key("Esc"),
+        Span::styled(" back/dismiss  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        key("q"),
+        Span::styled(" quit", Style::default().fg(C_MUTED).bg(C_BG2)),
+        Span::styled(
+            format!("   Selected [{filter_label}]"),
+            Style::default().fg(C_MUTED).bg(C_BG2),
+        ),
+    ]);
+
+    frame.render_widget(
+        Paragraph::new(spans).style(Style::default().bg(C_BG2)),
+        area,
+    );
 }
 
 fn render_filter_popup(frame: &mut Frame, app: &mut App) {
