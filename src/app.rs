@@ -7,6 +7,7 @@ use crossterm::event::ModifierKeyCode;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{DefaultTerminal, widgets::ScrollbarState};
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::mpsc::UnboundedReceiver;
 use watcher_rs_common::ExecEvent;
 
@@ -34,6 +35,7 @@ pub struct App {
     pub filter_mode: bool,
     pub event_idx: usize,
     pub event_name: String,
+    pub g_char: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +71,7 @@ impl Default for App {
             filter_mode: false,
             event_idx: 0,
             event_name: String::new(),
+            g_char: false,
         }
     }
 }
@@ -119,10 +122,6 @@ impl App {
             .filter(|(x, s)| match_query(&s, &self.search_query))
             .map(|(x, _)| x)
             .collect();
-    }
-
-    pub fn filter_by_events(&mut self) {
-        todo!()
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -191,17 +190,29 @@ impl App {
                     _ => Focus::Stream,
                 }
             }
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 if self.selected_tab == Focus::Stream {
                     self.scroll_up();
                 }
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 if self.selected_tab == Focus::Stream {
                     self.scroll_down()
                 }
             }
-
+            KeyCode::Char('g') => {
+                if self.g_char {
+                    self.selected = 0;
+                    self.g_char = false;
+                } else {
+                    self.g_char = true;
+                }
+            }
+            KeyCode::Char('G') => {
+                if !self.filtered_events.is_empty() {
+                    self.selected = self.filtered_events.len() - 1;
+                }
+            }
             KeyCode::Char('q') => self.running = false,
             KeyCode::Char('/') => {
                 self.searching = true;
@@ -212,7 +223,9 @@ impl App {
                 self.selected_tab = Focus::Filter;
             }
             KeyCode::Char('p') => self.pause = !self.pause,
-            _ => {}
+            _ => {
+                self.g_char = false;
+            }
         }
     }
 
@@ -237,9 +250,12 @@ impl App {
                 }
             }
 
-            terminal.draw(|frame| {
-                render(frame, &mut self);
-            });
+            if last_tick.elapsed() >= tick_rate {
+                terminal.draw(|frame| {
+                    render(frame, &mut self);
+                });
+                last_tick = Instant::now();
+            }
 
             let timeout = tick_rate
                 .checked_sub(last_tick.elapsed())

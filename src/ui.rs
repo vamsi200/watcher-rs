@@ -115,15 +115,20 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         C_BG
     };
 
+    const TIME_W: usize = 15;
+    const SEV_W: usize = 10;
+    const PID_W: usize = 17;
+    const TYPE_W: usize = 20;
+
     let line = Line::from(vec![
+        Span::raw(" "),
         Span::styled(
             format!(
-                "{:<12} {:<6} {:<18} {:<12}",
-                "TIME", "SEV", "PID/PROC", "TYPE"
+                " {:<TIME_W$} {:<SEV_W$} {:<PID_W$} {:<TYPE_W$}DETAIL",
+                "TIME", "SEV", "PID/PROC", "TYPE",
             ),
             Style::default().fg(C_MUTED).bg(C_BG2),
         ),
-        Span::styled("DETAIL", Style::default().fg(C_MUTED).bg(C_BG2)),
     ]);
 
     frame.render_widget(
@@ -166,24 +171,24 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         let line = Line::from(vec![
             Span::styled(border_char, Style::default().fg(sev_col).bg(bg)),
             Span::styled(
-                format!(" {:<11} ", &ts[..11.min(ts.len())]),
+                format!(" {:<TIME_W$}", &ts[..11.min(ts.len())]),
                 Style::default().fg(C_MUTED).bg(bg),
             ),
             Span::styled(
-                format!("{:<5}", sev.label()),
+                format!(" {:<SEV_W$}", sev.label()),
                 Style::default()
                     .fg(sev_col)
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("  "),
-            Span::styled(format!("{:<6}", pid), Style::default().fg(C_TEXT).bg(bg)),
-            Span::raw("  "),
             Span::styled(
-                format!("{:<10}", kind.trim()),
+                format!(" {:<PID_W$}", pid),
+                Style::default().fg(C_TEXT).bg(bg),
+            ),
+            Span::styled(
+                format!(" {:<TYPE_W$}", kind.trim()),
                 Style::default().fg(C_PURPLE).bg(bg),
             ),
-            Span::styled(" │ ", Style::default().fg(C_BORDER).bg(bg)),
             Span::styled(detail, Style::default().fg(detail_color(event)).bg(bg)),
         ]);
 
@@ -193,13 +198,14 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     while items.len() < height {
         items.push(ListItem::new(Line::from("")));
     }
+
     let list = List::new(items).style(Style::default().bg(C_BG));
     frame.render_widget(list, list_area);
 
     let total = app.filtered_events.len();
 
     if total > height {
-        render_scrollbar(frame, area, app.selected, total);
+        render_scrollbar(frame, inner, app.selected, total);
     }
 }
 
