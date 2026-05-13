@@ -5,6 +5,7 @@ use crate::ui::*;
 use color_eyre::config::FilterCallback;
 use crossterm::event::ModifierKeyCode;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use libc::setspent;
 use ratatui::{DefaultTerminal, widgets::ScrollbarState};
 use std::time::Duration;
 use std::time::Instant;
@@ -36,6 +37,7 @@ pub struct App {
     pub event_idx: usize,
     pub event_name: String,
     pub g_char: bool,
+    pub twle_hr_format: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +74,7 @@ impl Default for App {
             event_idx: 0,
             event_name: String::new(),
             g_char: false,
+            twle_hr_format: false,
         }
     }
 }
@@ -217,6 +220,9 @@ impl App {
             KeyCode::Char('/') => {
                 self.searching = true;
                 self.search_query.clear();
+            }
+            KeyCode::Char('t') => {
+                self.twle_hr_format = !self.twle_hr_format;
             }
             KeyCode::Char('f') => {
                 self.filter_mode = true;

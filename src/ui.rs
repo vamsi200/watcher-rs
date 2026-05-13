@@ -161,7 +161,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         let sev = event.severity();
         let is_sel = i == selected;
         let sev_col = sev_color(&sev);
-        let ts = format_timestamp_ns(event.timestamp());
+        let ts = format_timestamp_ns(event.timestamp(), app.twle_hr_format);
         let pid = event.pid();
         let kind = event.kind_label();
         let detail = event.detail();
@@ -259,7 +259,7 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Plain)
         .border_style(Style::default().fg(bg))
-        .style(Style::default().bg(C_BG2));
+        .style(Style::default().bg(C_BG));
 
     let inner_part = block.inner(area);
     frame.render_widget(block, area);
@@ -291,7 +291,7 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
                 indicators[i],
                 Style::default().fg(indicator_color).bg(C_BG3),
             ),
-            Span::styled(*label, label_stle.bg(C_BG)),
+            Span::styled(*label, label_stle.bg(C_BG3)),
             Span::styled(
                 format!("{:>5}", counts[i]),
                 Style::default().fg(C_MUTED).bg(C_BG3),
@@ -337,7 +337,7 @@ fn render_detail_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     };
 
-    let lines = build_detail_lines(event);
+    let lines = build_detail_lines(event, app);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -388,7 +388,7 @@ fn family_label(family: u16) -> &'static str {
     }
 }
 
-fn build_detail_lines(event: &AppEvent) -> Text<'static> {
+fn build_detail_lines(event: &AppEvent, app: &App) -> Text<'static> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let sev = event.severity();
     let sev_col = sev_color(&sev);
@@ -404,7 +404,7 @@ fn build_detail_lines(event: &AppEvent) -> Text<'static> {
         ),
     ]));
     lines.push(Line::from(Span::styled(
-        format_timestamp_ns(event.timestamp()),
+        format_timestamp_ns(event.timestamp(), app.twle_hr_format),
         Style::default().fg(C_MUTED),
     )));
     lines.push(Line::from(""));
@@ -547,6 +547,8 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(" search  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("f"),
         Span::styled(" filter  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        key("t"),
+        Span::styled(" 12/24 format  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("Esc"),
         Span::styled(" back/dismiss  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("q"),

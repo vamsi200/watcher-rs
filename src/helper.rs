@@ -1,6 +1,10 @@
 #![allow(unused)]
 use std::fs::File;
 use std::io::Read;
+use std::time::{Duration, SystemTime};
+
+use chrono::{DateTime, Local};
+use nix::time::{ClockId, clock_gettime};
 
 pub fn parse_addr(family: u16, addr: &[u8; 16]) -> String {
     match family {
@@ -48,13 +52,26 @@ pub fn flags_to_op(flags: i32) -> &'static str {
     }
 }
 
-pub fn format_timestamp_ns(ns: u64) -> String {
-    let total_ms = ns / 1_000_000;
-    let ms = total_ms % 1000;
-    let sec = (total_ms / 1000) % 60;
-    let min = (total_ms / 60_000) % 60;
-    let hr = (total_ms / 3_600_000) % 24;
-    format!("{hr:02}:{min:02}:{sec:02}.{ms:03}")
+pub fn format_timestamp_ns(ns: u64, use_24hr: bool) -> String {
+    let realtime_ns = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let mono = clock_gettime(ClockId::CLOCK_MONOTONIC).unwrap();
+    let mono_ns = mono.tv_sec() as u64 * 1_000_000_000 + mono.tv_nsec() as u64;
+    let wallclock_ns = realtime_ns - mono_ns + ns;
+    let secs = (wallclock_ns / 1_000_000_000) as i64;
+    let nanos = (wallclock_ns % 1_000_000_000) as u32;
+
+    let dt = DateTime::from_timestamp(secs, nanos)
+        .unwrap()
+        .with_timezone(&Local);
+
+    if use_24hr {
+        dt.format("%H:%M:%S%.3f").to_string()
+    } else {
+        dt.format("%I:%M:%S%.3f %p").to_string()
+    }
 }
 
 pub fn is_sensitive_path(path: &str) -> bool {
