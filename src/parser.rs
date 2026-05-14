@@ -9,7 +9,7 @@ use aya::{
     programs::{FEntry, TracePoint},
 };
 use aya_log::EbpfLogger;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::{
     ffi::CStr,
     fs::{self, File},
@@ -155,6 +155,7 @@ const SUSPICIOUS_FLAGS: &[(i32, &str)] = &[
 
 // are ya sure??
 const SUSPICIOUS_PORTS: &[(u16, &str, Severity)] = &[
+    (22, "test", Severity::High),
     (4444, "Metasploit default listener", Severity::High),
     (1337, "Common backdoor port", Severity::High),
     (31337, "Elite/Back Orifice backdoor", Severity::High),
@@ -205,11 +206,11 @@ const HIGH_READ_THRESHOLD: usize = 200;
 const MED_READ_THRESHOLD: usize = 80;
 
 // TODO: Test and refine the approach
-pub fn detect_suspicious_file_access(events: &[FileEvent]) -> Vec<SuspiciousEvent> {
+pub fn detect_suspicious_file_access(events: &mut VecDeque<FileEvent>) -> Vec<SuspiciousEvent> {
     let mut suspicious = Vec::new();
     let mut pid_access_counts: HashMap<u32, (usize, u64)> = HashMap::new();
 
-    for event in events {
+    if let Some(event) = events.pop_front() {
         let filename = bytes_to_str(&event.filename);
 
         if let Some(matched_path) = SENSITIVE_PATHS.iter().find(|&&p| filename.starts_with(p)) {
@@ -329,7 +330,7 @@ pub fn detect_suspicious_network(
         });
     }
 
-    if let Some(&(_, description, ref sev)) =
+    while let Some(&(_, description, ref sev)) =
         SUSPICIOUS_PORTS.iter().find(|&&(p, _, _)| p == event.port)
     {
         suspicious.push(SuspiciousEvent {
@@ -425,12 +426,12 @@ pub fn detect_suspicious_network(
     suspicious
 }
 
-pub fn detect_input_device_access(events: &[FileEvent]) -> Vec<SuspiciousEvent> {
+pub fn detect_input_device_access(events: &mut VecDeque<FileEvent>) -> Vec<SuspiciousEvent> {
     let mut suspicious = Vec::new();
     let mut pid_access_counts: HashMap<u32, (usize, u64)> = HashMap::new();
     let mut pid_devices_seen: HashMap<u32, HashSet<String>> = HashMap::new();
 
-    for event in events {
+    while let Some(event) = events.pop_front() {
         let filename = bytes_to_str(&event.filename);
 
         let device_match = INPUT_DEVICE_PATHS

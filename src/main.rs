@@ -64,9 +64,10 @@ async fn main() -> color_eyre::Result<()> {
     prog.load()?;
     prog.attach("syscalls", "sys_enter_execve")?;
 
-    // let prog: &mut TracePoint = bpf.program_mut("sys_enter_openat").unwrap().try_into()?;
-    // prog.load()?;
-    // prog.attach("syscalls", "sys_enter_openat")?;
+    // FIX: openat and filp_close is creating a lot of noice.
+    let prog: &mut TracePoint = bpf.program_mut("sys_enter_openat").unwrap().try_into()?;
+    prog.load()?;
+    prog.attach("syscalls", "sys_enter_openat")?;
 
     let prog: &mut TracePoint = bpf.program_mut("sched_process_exit").unwrap().try_into()?;
     prog.load()?;

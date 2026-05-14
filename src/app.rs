@@ -1,16 +1,23 @@
 #![allow(unused)]
 use crate::AppEvent;
 use crate::Severity;
+use crate::parser::detect_input_device_access;
+use crate::parser::detect_suspicious_file_access;
+use crate::parser::detect_suspicious_network;
 use crate::ui::*;
 use color_eyre::config::FilterCallback;
 use crossterm::event::ModifierKeyCode;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use libc::setspent;
 use ratatui::{DefaultTerminal, widgets::ScrollbarState};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedReceiver;
 use watcher_rs_common::ExecEvent;
+use watcher_rs_common::FileEvent;
 
 #[derive(Debug)]
 pub struct App {
@@ -38,6 +45,8 @@ pub struct App {
     pub event_name: String,
     pub g_char: bool,
     pub twle_hr_format: bool,
+    pub pid_conn_counts: HashMap<u32, (usize, u64)>,
+    pub pid_ports_seen: HashMap<u32, HashSet<u16>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +84,8 @@ impl Default for App {
             event_name: String::new(),
             g_char: false,
             twle_hr_format: false,
+            pid_conn_counts: HashMap::new(),
+            pid_ports_seen: HashMap::new(),
         }
     }
 }
@@ -248,10 +259,38 @@ impl App {
     ) -> color_eyre::Result<()> {
         let mut last_tick = std::time::Instant::now();
         let tick_rate = Duration::from_millis(50);
+        let mut events_map: VecDeque<FileEvent> = VecDeque::new();
 
         while self.running {
             while let Ok(event) = rx.try_recv() {
                 if !self.pause {
+                    match &event {
+                        AppEvent::Network(ne) => {
+                            let s_events = detect_suspicious_network(
+                                &ne,
+                                &mut self.pid_conn_counts,
+                                &mut self.pid_ports_seen,
+                            );
+                            for event in s_events {
+                                self.push(AppEvent::Suspicious(event));
+                            }
+                        }
+                        AppEvent::File(fe) => {
+                            events_map.push_back(fe.clone());
+                            let f_events = detect_suspicious_file_access(&mut events_map);
+                            let i_events = detect_input_device_access(&mut events_map);
+
+                            for event in f_events {
+                                self.push(AppEvent::Suspicious(event));
+                            }
+
+                            for event in i_events {
+                                self.push(AppEvent::Suspicious(event));
+                            }
+                        }
+                        _ => {}
+                    };
+
                     self.push(event);
                 }
             }
