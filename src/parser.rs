@@ -9,6 +9,7 @@ use aya::{
     programs::{FEntry, TracePoint},
 };
 use aya_log::EbpfLogger;
+use bpfx::NetworkEvent;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::{
     ffi::CStr,
@@ -19,7 +20,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use std::{ptr::read, thread::sleep};
-use watcher_rs_common::*;
 
 pub fn get_running_processes() -> Result<Vec<ProcessInfo>> {
     let read_dir = fs::read_dir("/proc/")?;
@@ -41,74 +41,75 @@ pub fn get_running_processes() -> Result<Vec<ProcessInfo>> {
     Ok(process_info)
 }
 
-pub fn track_process_exec(ring_buf: &mut RingBuf<&mut MapData>) -> Result<Option<ProcessEvent>> {
-    let mut p_event: Option<ProcessEvent> = None;
+//TODO:
+// pub fn track_process_exec(ring_buf: &mut RingBuf<&mut MapData>) -> Result<Option<ProcessEvent>> {
+//     let mut p_event: Option<ProcessEvent> = None;
+//
+//     if let Some(data) = ring_buf.next() {
+//         let event = unsafe { read(data.as_ptr() as *const ExecEvent) };
+//         let proc_info = ProcessInfo::get_process_info_from_pid(event.pid);
+//
+//         let mut uid = 0u32;
+//         if let Ok(mut file) = File::open(format!("/proc/{}/status", event.pid)) {
+//             let reader = BufReader::new(file);
+//
+//             for line in reader.lines() {
+//                 let line = line?;
+//                 let split: Vec<&str> = line.trim().split(":").collect();
+//                 match split[0] {
+//                     "Uid" => {
+//                         if let Some(s) = split[1].split_whitespace().nth(1) {
+//                             uid = s.parse()?;
+//                         }
+//                     }
+//                     _ => {}
+//                 }
+//             }
+//         }
+//
+//         p_event = Some(ProcessEvent {
+//             info: proc_info,
+//             uid: uid,
+//             timestamp: event.timestamp,
+//         })
+//     }
+//
+//     Ok(p_event)
+// }
 
-    if let Some(data) = ring_buf.next() {
-        let event = unsafe { read(data.as_ptr() as *const ExecEvent) };
-        let proc_info = ProcessInfo::get_process_info_from_pid(event.pid);
-
-        let mut uid = 0u32;
-        if let Ok(mut file) = File::open(format!("/proc/{}/status", event.pid)) {
-            let reader = BufReader::new(file);
-
-            for line in reader.lines() {
-                let line = line?;
-                let split: Vec<&str> = line.trim().split(":").collect();
-                match split[0] {
-                    "Uid" => {
-                        if let Some(s) = split[1].split_whitespace().nth(1) {
-                            uid = s.parse()?;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        p_event = Some(ProcessEvent {
-            info: proc_info,
-            uid: uid,
-            timestamp: event.timestamp,
-        })
-    }
-
-    Ok(p_event)
-}
-
-#[derive(Debug)]
-pub enum Event {
-    ProcessExec(ExecEvent),
-    ProcessExit(ProcessExitEvent),
-    FileOpen(FileEvent),
-    FileClose(FileCloseEvent),
-    Network(NetworkEvent),
-    Unknown(u32),
-}
-
-pub fn ret_event(ring_buf: &mut RingBuf<&mut MapData>) -> Option<AppEvent> {
-    let data = ring_buf.next()?;
-    let ptr = data.as_ptr();
-
-    let header = unsafe { read(ptr as *const EventHeader) };
-
-    let event = match header.kind {
-        0 => AppEvent::Exec(unsafe { read(ptr as *const ExecEvent) }),
-        1 => AppEvent::ExecExit(unsafe { read(ptr as *const ProcessExitEvent) }),
-        2 => AppEvent::File(unsafe { read(ptr as *const FileEvent) }),
-        3 => AppEvent::FileClose(unsafe { read(ptr as *const FileCloseEvent) }),
-        4 => AppEvent::Network(unsafe { read(ptr as *const NetworkEvent) }),
-        k => return None,
-    };
-
-    Some(event)
-}
+// #[derive(Debug)]
+// pub enum Event {
+//     ProcessExec(ExecEvent),
+//     ProcessExit(ProcessExitEvent),
+//     FileOpen(FileEvent),
+//     FileClose(FileCloseEvent),
+//     Network(NetworkEvent),
+//     Unknown(u32),
+// }
+//
+// pub fn ret_event(ring_buf: &mut RingBuf<&mut MapData>) -> Option<AppEvent> {
+//     let data = ring_buf.next()?;
+//     let ptr = data.as_ptr();
+//
+//     let header = unsafe { read(ptr as *const EventHeader) };
+//
+//     let event = match header.kind {
+//         0 => AppEvent::Exec(unsafe { read(ptr as *const ExecEvent) }),
+//         1 => AppEvent::ExecExit(unsafe { read(ptr as *const ProcessExitEvent) }),
+//         2 => AppEvent::File(unsafe { read(ptr as *const FileEvent) }),
+//         3 => AppEvent::FileClose(unsafe { read(ptr as *const FileCloseEvent) }),
+//         4 => AppEvent::Network(unsafe { read(ptr as *const NetworkEvent) }),
+//         k => return None,
+//     };
+//
+//     Some(event)
+// }
 
 // TODO: Test and refine the approach
-fn detect_privileged_exec(events: &[ExecEvent]) -> Vec<PrivilegeEvent> {
+fn detect_privileged_exec(events: &[ProcessStartEvent]) -> Vec<PrivilegeEvent> {
     let mut p_events = Vec::new();
     for ev in events {
-        let file_name = std::fs::read_link(format!("/proc/{}/exe", ev.pid))
+        let file_name = std::fs::read_link(format!("/proc/{}/exe", ev.header.pid))
             .unwrap_or_else(|_| PathBuf::from("unknown")); // find some other way to find the
         // binary
 
@@ -117,13 +118,13 @@ fn detect_privileged_exec(events: &[ExecEvent]) -> Vec<PrivilegeEvent> {
             Err(_) => false,
         };
 
-        if is_setuid || ev.uid == 0 {
+        if is_setuid || ev.header.uid == 0 {
             p_events.push(PrivilegeEvent {
-                pid: ev.pid,
-                uid: ev.uid,
-                binary: file_name,
+                pid: ev.header.pid,
+                uid: ev.header.uid,
+                binary: file_name.to_str().unwrap().to_owned(),
                 is_setuid,
-                timestamp: ev.timestamp,
+                timestamp: ev.header.timestamp_ns,
             });
         }
     }
@@ -206,12 +207,12 @@ const HIGH_READ_THRESHOLD: usize = 200;
 const MED_READ_THRESHOLD: usize = 80;
 
 // TODO: Test and refine the approach
-pub fn detect_suspicious_file_access(events: &mut VecDeque<FileEvent>) -> Vec<SuspiciousEvent> {
+pub fn detect_suspicious_file_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<SuspiciousEvent> {
     let mut suspicious = Vec::new();
     let mut pid_access_counts: HashMap<u32, (usize, u64)> = HashMap::new();
 
     if let Some(event) = events.pop_front() {
-        let filename = bytes_to_str(&event.filename);
+        let filename = event.filename;
 
         if let Some(matched_path) = SENSITIVE_PATHS.iter().find(|&&p| filename.starts_with(p)) {
             let severity = if matches!(*matched_path, "/etc/shadow" | "/.ssh/" | "/etc/sudoers") {
@@ -221,84 +222,85 @@ pub fn detect_suspicious_file_access(events: &mut VecDeque<FileEvent>) -> Vec<Su
             };
 
             suspicious.push(SuspiciousEvent {
-                pid: event.pid,
+                pid: event.header.pid,
                 reason: format!("Access to sensitive path: {}", filename),
                 file: filename.clone(),
                 severity,
-                timestamp: event.timestamp,
+                timestamp: event.header.timestamp_ns,
             });
         }
 
-        if event.uid != 0 && is_root_only_path(&filename) {
+        if event.header.uid != 0 && is_root_only_path(&filename) {
             suspicious.push(SuspiciousEvent {
-                pid: event.pid,
+                pid: event.header.pid,
                 reason: format!(
                     "Non-root UID {} accessing privileged path: {}",
-                    event.uid, filename
+                    event.header.uid, filename
                 ),
                 file: filename.clone(),
                 severity: Severity::High,
-                timestamp: event.timestamp,
+                timestamp: event.header.timestamp_ns,
             });
         }
 
         for &(flag_combo, description) in SUSPICIOUS_FLAGS {
-            if event.flags & flag_combo == flag_combo {
+            if event.flags as i32 & flag_combo == flag_combo {
+                //TODO: fix this
                 suspicious.push(SuspiciousEvent {
-                    pid: event.pid,
+                    pid: event.header.pid,
                     reason: format!("Suspicious open flags on '{}': {}", filename, description),
                     file: filename.clone(),
                     severity: Severity::Medium,
-                    timestamp: event.timestamp,
+                    timestamp: event.header.timestamp_ns,
                 });
                 break;
             }
         }
 
         let entry = pid_access_counts
-            .entry(event.pid)
-            .or_insert((0, event.timestamp));
+            .entry(event.header.pid)
+            .or_insert((0, event.header.timestamp_ns));
 
-        if event.timestamp - entry.1 <= TIME_WINDOW_NS {
+        if event.header.timestamp_ns - entry.1 <= TIME_WINDOW_NS {
             entry.0 += 1;
         } else {
-            *entry = (1, event.timestamp);
+            *entry = (1, event.header.timestamp_ns);
         }
 
         let access_count = entry.0;
         if access_count == HIGH_FREQ_THRESHOLD {
             suspicious.push(SuspiciousEvent {
-                pid: event.pid,
+                pid: event.header.pid,
                 reason: format!(
                     "High-frequency file access: {} accesses in 1s window",
                     access_count
                 ),
                 file: filename.clone(),
                 severity: Severity::High,
-                timestamp: event.timestamp,
+                timestamp: event.header.timestamp_ns,
             });
         } else if access_count == MED_FREQ_THRESHOLD {
             suspicious.push(SuspiciousEvent {
-                pid: event.pid,
+                pid: event.header.pid,
                 reason: format!(
                     "Elevated file access rate: {} accesses in 1s window",
                     access_count
                 ),
                 file: filename.clone(),
                 severity: Severity::Medium,
-                timestamp: event.timestamp,
+                timestamp: event.header.timestamp_ns,
             });
         }
 
-        if event.dir_fd != libc::AT_FDCWD && event.dir_fd < 0 {
-            suspicious.push(SuspiciousEvent {
-                pid: event.pid,
-                reason: format!("Invalid dir_fd {} used in openat syscall", event.dir_fd),
-                file: filename,
-                severity: Severity::Low,
-                timestamp: event.timestamp,
-            });
-        }
+        // if event.dir_fd != libc::AT_FDCWD && event.dir_fd < 0 {
+        //     suspicious.push(SuspiciousEvent {
+        //         pid: event.pid,
+        //         reason: format!("Invalid dir_fd {} used in openat syscall", event.dir_fd),
+        //         file: filename,
+        //         severity: Severity::Low,
+        //         timestamp: event.timestamp,
+        //     });
+        // }
     }
 
     suspicious.dedup_by(|a, b| {
@@ -310,35 +312,36 @@ pub fn detect_suspicious_file_access(events: &mut VecDeque<FileEvent>) -> Vec<Su
 
 // TODO: Test and refine the approach
 pub fn detect_suspicious_network(
-    event: &NetworkEvent,
+    event: &AcceptEvent,
     pid_conn_counts: &mut HashMap<u32, (usize, u64)>,
     pid_ports_seen: &mut HashMap<u32, HashSet<u16>>,
 ) -> Vec<SuspiciousEvent> {
     let mut suspicious = Vec::new();
 
-    let addr = parse_addr(event.family, &event.addr);
-    if event.family != 2 && event.family != 10 {
-        suspicious.push(SuspiciousEvent {
-            pid: event.pid,
-            file: addr.clone(),
-            reason: format!(
-                "Unusual socket family {} (not AF_INET/AF_INET6)",
-                event.family
-            ),
-            severity: Severity::Medium,
-            timestamp: event.timestamp,
-        });
-    }
+    let addr = event.endpoints.remote_ip.to_string();
+    // if event.family != 2 && event.family != 10 {
+    //     suspicious.push(SuspiciousEvent {
+    //         pid: event.pid,
+    //         file: addr.clone(),
+    //         reason: format!(
+    //             "Unusual socket family {} (not AF_INET/AF_INET6)",
+    //             event.family
+    //         ),
+    //         severity: Severity::Medium,
+    //         timestamp: event.timestamp,
+    //     });
+    // }
 
-    while let Some(&(_, description, ref sev)) =
-        SUSPICIOUS_PORTS.iter().find(|&&(p, _, _)| p == event.port)
+    while let Some(&(_, description, ref sev)) = SUSPICIOUS_PORTS
+        .iter()
+        .find(|&&(p, _, _)| p == event.endpoints.remote_port)
     {
         suspicious.push(SuspiciousEvent {
-            pid: event.pid,
+            pid: event.header.pid,
             file: addr.clone(),
             reason: format!(
                 "Connection to suspicious port {}: {}",
-                event.port, description
+                event.endpoints.remote_port, description
             ),
             severity: match sev {
                 Severity::Critical => Severity::Critical,
@@ -347,77 +350,80 @@ pub fn detect_suspicious_network(
                 Severity::Low => Severity::Low,
                 Severity::Info => Severity::Info,
             },
-            timestamp: event.timestamp,
+            timestamp: event.header.timestamp_ns,
         });
     }
 
-    if event.port > 0 && event.port < 1024 {
+    if event.endpoints.remote_port > 0 && event.endpoints.remote_port < 1024 {
         suspicious.push(SuspiciousEvent {
-            pid: event.pid,
+            pid: event.header.pid,
             file: addr.clone(),
-            reason: format!("Connection to privileged port {}", event.port),
+            reason: format!(
+                "Connection to privileged port {}",
+                event.endpoints.remote_port
+            ),
             severity: Severity::Low,
-            timestamp: event.timestamp,
+            timestamp: event.header.timestamp_ns,
         });
     }
 
     let conn_entry = pid_conn_counts
-        .entry(event.pid)
-        .or_insert((0, event.timestamp));
+        .entry(event.header.pid)
+        .or_insert((0, event.header.timestamp_ns));
 
-    if event.timestamp - conn_entry.1 <= TIME_WINDOW_NS {
+    if event.header.timestamp_ns - conn_entry.1 <= TIME_WINDOW_NS {
         conn_entry.0 += 1;
     } else {
-        *conn_entry = (1, event.timestamp);
+        *conn_entry = (1, event.header.timestamp_ns);
     }
 
     let conn_count = conn_entry.0;
     if conn_count == HIGH_CONN_THRESHOLD {
         suspicious.push(SuspiciousEvent {
-            pid: event.pid,
+            pid: event.header.pid,
             file: addr.clone(),
             reason: format!(
                 "High-frequency connections: {} in 1s (possible DDoS/scanner)",
                 conn_count
             ),
             severity: Severity::High,
-            timestamp: event.timestamp,
+            timestamp: event.header.timestamp_ns,
         });
     } else if conn_count == MED_CONN_THRESHOLD {
         suspicious.push(SuspiciousEvent {
-            pid: event.pid,
+            pid: event.header.pid,
             file: addr.clone(),
             reason: format!("Elevated connection rate: {} in 1s", conn_count),
             severity: Severity::Medium,
-            timestamp: event.timestamp,
+            timestamp: event.header.timestamp_ns,
         });
     }
 
-    let ports_seen = pid_ports_seen.entry(event.pid).or_default();
-    ports_seen.insert(event.port);
+    let ports_seen = pid_ports_seen.entry(event.header.pid).or_default();
+    ports_seen.insert(event.endpoints.remote_port);
 
     if ports_seen.len() == 20 {
         suspicious.push(SuspiciousEvent {
-            pid: event.pid,
+            pid: event.header.pid,
             file: addr.clone(),
             reason: format!(
                 "Possible port scan: {} unique ports contacted",
                 ports_seen.len()
             ),
             severity: Severity::High,
-            timestamp: event.timestamp,
+            timestamp: event.header.timestamp_ns,
         });
     }
 
-    if event.sockfd < 0 {
-        suspicious.push(SuspiciousEvent {
-            pid: event.pid,
-            file: addr.clone(),
-            reason: format!("Invalid sockfd {} in network event", event.sockfd),
-            severity: Severity::Low,
-            timestamp: event.timestamp,
-        });
-    }
+    // if event.sockfd < 0 {
+    //     suspicious.push(SuspiciousEvent {
+    //         pid: event.pid,
+    //         file: addr.clone(),
+    //         reason: format!("Invalid sockfd {} in network event", event.sockfd),
+    //         severity: Severity::Low,
+    //         timestamp: event.timestamp,
+    //     });
+    // }
 
     suspicious.dedup_by(|a, b| {
         a.pid == b.pid && a.reason == b.reason && a.timestamp.abs_diff(b.timestamp) < TIME_WINDOW_NS
@@ -426,13 +432,13 @@ pub fn detect_suspicious_network(
     suspicious
 }
 
-pub fn detect_input_device_access(events: &mut VecDeque<FileEvent>) -> Vec<SuspiciousEvent> {
+pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<SuspiciousEvent> {
     let mut suspicious = Vec::new();
     let mut pid_access_counts: HashMap<u32, (usize, u64)> = HashMap::new();
     let mut pid_devices_seen: HashMap<u32, HashSet<String>> = HashMap::new();
 
     while let Some(event) = events.pop_front() {
-        let filename = bytes_to_str(&event.filename);
+        let filename = &event.filename;
 
         let device_match = INPUT_DEVICE_PATHS
             .iter()
@@ -443,7 +449,7 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileEvent>) -> Vec<Suspi
         };
 
         suspicious.push(SuspiciousEvent {
-            pid: event.pid,
+            pid: event.header.pid,
             file: filename.clone(),
             reason: description.to_string(),
             severity: match sev {
@@ -453,115 +459,116 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileEvent>) -> Vec<Suspi
                 Severity::Low => Severity::Low,
                 Severity::Info => Severity::Info,
             },
-            timestamp: event.timestamp,
+            timestamp: event.header.timestamp_ns,
         });
 
-        if event.uid != 0 {
+        if event.header.uid != 0 {
             suspicious.push(SuspiciousEvent {
-                pid: event.pid,
+                pid: event.header.pid,
                 file: filename.clone(),
                 reason: format!(
                     "Non-root UID {} reading raw input device - possible keylogger",
-                    event.uid
+                    event.header.uid
                 ),
                 severity: Severity::High,
-                timestamp: event.timestamp,
+                timestamp: event.header.timestamp_ns,
             });
         }
 
         for &(flag, reason) in SUSPICIOUS_INPUT_FLAGS {
-            if event.flags & flag == flag {
+            if event.flags as i32 & flag == flag {
+                //TODO: fix this
                 suspicious.push(SuspiciousEvent {
-                    pid: event.pid,
+                    pid: event.header.pid,
                     file: filename.clone(),
                     reason: format!("{} on '{}'", reason, filename),
                     severity: Severity::High,
-                    timestamp: event.timestamp,
+                    timestamp: event.header.timestamp_ns,
                 });
                 break;
             }
         }
 
-        if event.mode & 0o4000 != 0 {
+        if u32::from(event.file_type.clone()) & 0o4000 != 0 {
             suspicious.push(SuspiciousEvent {
-                pid: event.pid,
+                pid: event.header.pid,
                 file: filename.clone(),
                 reason: format!("SUID bit set on input device access '{}'", filename),
                 severity: Severity::High,
-                timestamp: event.timestamp,
+                timestamp: event.header.timestamp_ns,
             });
         }
-        if event.mode & 0o2000 != 0 {
+        if u32::from(event.file_type) & 0o2000 != 0 {
             suspicious.push(SuspiciousEvent {
-                pid: event.pid,
+                pid: event.header.pid,
                 file: filename.clone(),
                 reason: format!("SGID bit set on input device access '{}'", filename),
                 severity: Severity::Medium,
-                timestamp: event.timestamp,
+                timestamp: event.header.timestamp_ns,
             });
         }
 
         let entry = pid_access_counts
-            .entry(event.pid)
-            .or_insert((0, event.timestamp));
+            .entry(event.header.pid)
+            .or_insert((0, event.header.timestamp_ns));
 
-        if event.timestamp - entry.1 <= TIME_WINDOW_NS {
+        if event.header.timestamp_ns - entry.1 <= TIME_WINDOW_NS {
             entry.0 += 1;
         } else {
-            *entry = (1, event.timestamp);
+            *entry = (1, event.header.timestamp_ns);
         }
 
         let count = entry.0;
         if count == HIGH_READ_THRESHOLD {
             suspicious.push(SuspiciousEvent {
-                pid: event.pid,
+                pid: event.header.pid,
                 file: filename.clone(),
                 reason: format!(
                     "High-frequency input device polling: {} reads/s - likely a keylogger",
                     count
                 ),
                 severity: Severity::High,
-                timestamp: event.timestamp,
+                timestamp: event.header.timestamp_ns,
             });
         } else if count == MED_READ_THRESHOLD {
             suspicious.push(SuspiciousEvent {
-                pid: event.pid,
+                pid: event.header.pid,
                 file: filename.clone(),
                 reason: format!("Elevated input device polling: {} reads/s", count),
                 severity: Severity::Medium,
-                timestamp: event.timestamp,
+                timestamp: event.header.timestamp_ns,
             });
         }
 
-        let devices = pid_devices_seen.entry(event.pid).or_default();
+        let devices = pid_devices_seen.entry(event.header.pid).or_default();
         devices.insert(filename.clone());
 
         if devices.len() == 5 {
             suspicious.push(SuspiciousEvent {
-                pid: event.pid,
+                pid: event.header.pid,
                 file: filename.clone(),
                 reason: format!(
                     "PID {} accessing {} distinct input devices - scraping all inputs",
-                    event.pid,
+                    event.header.pid,
                     devices.len()
                 ),
                 severity: Severity::High,
-                timestamp: event.timestamp,
+                timestamp: event.header.timestamp_ns,
             });
         }
 
-        if event.dir_fd != libc::AT_FDCWD && event.dir_fd < 0 {
-            suspicious.push(SuspiciousEvent {
-                pid: event.pid,
-                file: filename.clone(),
-                reason: format!(
-                    "Invalid dir_fd {} used to open input device '{}'",
-                    event.dir_fd, filename
-                ),
-                severity: Severity::Low,
-                timestamp: event.timestamp,
-            });
-        }
+        // if event.dir_fd != libc::AT_FDCWD && event.dir_fd < 0 {
+        //     suspicious.push(SuspiciousEvent {
+        //         pid: event.header.pid,
+        //         file: filename.clone(),
+        //         reason: format!(
+        //             "Invalid dir_fd {} used to open input device '{}'",
+        //             event.dir_fd, filename
+        //         ),
+        //         severity: Severity::Low,
+        //         timestamp: event.header.timestamp_ns,
+        //     });
+        // }
     }
 
     suspicious.dedup_by(|a, b| {

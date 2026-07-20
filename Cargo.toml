@@ -10,12 +10,14 @@ aya-ebpf = "0.1.1"
 aya-ebpf-macros = "0.1.2"
 aya-log = "0.2.1"
 aya-log-ebpf = "0.1.0"
+bpfx = {path = "/home/vamsi/scripts/bpfx/"}
 chrono = "0.4.44"
 color-eyre = "0.6.5"
 crossterm = "0.29.0"
 env_logger = "0.11.10"
+futures = "0.3.33"
 libc = "0.2.186"
 nix = { version = "0.31.3", features = ["time"] }
 ratatui = "0.30.0"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "full"] }
-watcher-rs-common = {path = "./watcher-rs-common/"}
+rkyv = "0.8.16"
+tokio = { version = "1", features = ["full"] }

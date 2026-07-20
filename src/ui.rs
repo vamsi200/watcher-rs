@@ -376,7 +376,7 @@ fn uid_color(uid: u32) -> Color {
 fn port_color(port: u16) -> Color {
     match port {
         22 | 443 | 80 => C_GREEN,
-        4444 | 1337 => C_RED, // lol
+        4444 | 1337 => C_RED,
         _ => C_TEXT,
     }
 }
@@ -412,74 +412,83 @@ fn build_detail_lines(event: &AppEvent, app: &App) -> Text<'static> {
     match event {
         AppEvent::Exec(e) => {
             section(&mut lines, "PROCESS");
-            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
-            kv(&mut lines, "uid", &uid_label(e.uid), uid_color(e.uid));
-            kv(&mut lines, "file", &bytes_to_str(&e.filename), C_PATH);
+            kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
+            kv(
+                &mut lines,
+                "uid",
+                &uid_label(e.header.uid),
+                uid_color(e.header.uid),
+            );
+            kv(&mut lines, "file", &e.header.comm, C_PATH);
         }
         AppEvent::ExecExit(e) => {
             section(&mut lines, "PROCESS");
-            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
+            kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
         }
         AppEvent::File(e) => {
             section(&mut lines, "PROCESS");
-            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
-            kv(&mut lines, "uid", &uid_label(e.uid), uid_color(e.uid));
+            kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
+            kv(
+                &mut lines,
+                "uid",
+                &uid_label(e.header.uid),
+                uid_color(e.header.uid),
+            );
             lines.push(Line::from(""));
             section(&mut lines, "FILE");
-            let op = flags_to_op(e.flags);
-            let path = bytes_to_str(&e.filename);
-            let path_col = if crate::helper::is_sensitive_path(&path) {
+            let op = &e.file_type;
+            let name = &e.filename;
+            let path_col = if crate::helper::is_sensitive_path(&name) {
                 C_RED
             } else {
                 C_PATH
             };
-            kv(&mut lines, "path", &path, path_col);
-            kv(&mut lines, "op", op, C_TEXT);
+            kv(&mut lines, "name", &name, path_col);
+            kv(&mut lines, "op", &format!("{op:?}"), C_TEXT);
             kv(&mut lines, "flags", &format!("{:#010x}", e.flags), C_MUTED);
-            kv(&mut lines, "mode", &format!("{:04o}", e.mode), C_MUTED);
-            kv(&mut lines, "dir_fd", &e.dir_fd.to_string(), C_MUTED);
+            kv(&mut lines, "mode", &format!("{:?}", e.file_type), C_MUTED);
         }
         AppEvent::FileClose(e) => {
             section(&mut lines, "FILE");
-            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
-            kv(&mut lines, "path", &bytes_to_str(&e.file_name), C_PATH);
+            kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
+            kv(&mut lines, "path", &e.header.comm, C_PATH);
         }
         AppEvent::Network(e) => {
-            let addr = helper::parse_addr(e.family, &e.addr);
+            let addr = e.endpoints.remote_ip.to_string();
             section(&mut lines, "PROCESS");
-            kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
+            kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
             lines.push(Line::from(""));
             section(&mut lines, "NETWORK");
             kv(&mut lines, "dst", &addr, C_BLUE);
-            kv(&mut lines, "port", &e.port.to_string(), port_color(e.port));
-            kv(&mut lines, "family", &family_label(e.family), C_MUTED);
-            kv(&mut lines, "sockfd", &e.sockfd.to_string(), C_MUTED);
+            kv(
+                &mut lines,
+                "port",
+                &e.endpoints.remote_port.to_string(),
+                port_color(e.endpoints.remote_port),
+            );
+            // kv(&mut lines, "family", &family_label(e.), C_MUTED);
+            // kv(&mut lines, "sockfd", &e.sockfd.to_string(), C_MUTED);
         }
-        AppEvent::Process(e) => {
-            section(&mut lines, "PROCESS");
-            kv(&mut lines, "name", &e.info.name, C_TEXT);
-            kv(&mut lines, "pid", &e.info.pid.to_string(), C_TEXT);
-            kv(&mut lines, "ppid", &e.info.ppid.to_string(), C_MUTED);
-            kv(&mut lines, "uid", &uid_label(e.uid), uid_color(e.uid));
-            lines.push(Line::from(""));
-            section(&mut lines, "CMDLINE");
-            lines.push(Line::from(Span::styled(
-                e.info.cmdline.clone(),
-                Style::default().fg(C_PATH),
-            )));
-        }
+        // AppEvent::Process(e) => {
+        //     section(&mut lines, "PROCESS");
+        //     kv(&mut lines, "name", &e.info.name, C_TEXT);
+        //     kv(&mut lines, "pid", &e.info.pid.to_string(), C_TEXT);
+        //     kv(&mut lines, "ppid", &e.info.ppid.to_string(), C_MUTED);
+        //     kv(&mut lines, "uid", &uid_label(e.uid), uid_color(e.uid));
+        //     lines.push(Line::from(""));
+        //     section(&mut lines, "CMDLINE");
+        //     lines.push(Line::from(Span::styled(
+        //         e.info.cmdline.clone(),
+        //         Style::default().fg(C_PATH),
+        //     )));
+        // }
         AppEvent::Privilege(e) => {
             section(&mut lines, "PROCESS");
             kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
             kv(&mut lines, "uid", &uid_label(e.uid), uid_color(e.uid));
             lines.push(Line::from(""));
             section(&mut lines, "PRIVILEGE");
-            kv(
-                &mut lines,
-                "binary",
-                &e.binary.display().to_string(),
-                C_PATH,
-            );
+            kv(&mut lines, "binary", &e.binary, C_PATH);
             kv(
                 &mut lines,
                 "setuid",

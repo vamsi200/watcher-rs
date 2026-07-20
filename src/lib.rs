@@ -1,16 +1,21 @@
 pub mod app;
+pub mod detection;
 pub mod helper;
 pub mod parser;
 pub mod ui;
+pub mod write;
 
 use crate::helper::*;
+use bpfx::file::{FileCloseEvent, FileOpenEvent};
+use bpfx::network::AcceptEvent;
+use bpfx::process::{ProcessExitEvent, ProcessStartEvent};
 use std::fs::File;
 use std::io::Read;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
-use watcher_rs_common::*;
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(
+    Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub struct ProcessInfo {
     pub pid: u32,
     pub ppid: u32,
@@ -55,23 +60,29 @@ impl ProcessInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(
+    Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub struct ProcessEvent {
     pub info: ProcessInfo,
     pub uid: u32,
     pub timestamp: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(
+    Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub struct PrivilegeEvent {
     pub pid: u32,
     pub uid: u32,
-    pub binary: PathBuf,
+    pub binary: String,
     pub is_setuid: bool,
     pub timestamp: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(
+    Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub struct SuspiciousEvent {
     pub pid: u32,
     pub file: String,
@@ -80,7 +91,9 @@ pub struct SuspiciousEvent {
     pub timestamp: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(
+    Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub enum Severity {
     Info,
     Low,
@@ -88,6 +101,7 @@ pub enum Severity {
     High,
     Critical,
 }
+
 impl Severity {
     pub fn label(&self) -> &'static str {
         match self {
@@ -102,12 +116,12 @@ impl Severity {
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum AppEvent {
-    Exec(ExecEvent),
+    Exec(ProcessStartEvent),
     ExecExit(ProcessExitEvent),
-    File(FileEvent),
+    File(FileOpenEvent),
     FileClose(FileCloseEvent),
-    Network(NetworkEvent),
-    Process(ProcessEvent),
+    Network(AcceptEvent),
+    // Process(ProcessEvent),
     Privilege(PrivilegeEvent),
     Suspicious(SuspiciousEvent),
 }
@@ -121,7 +135,7 @@ impl AppEvent {
             "FileEvent" => matches!(self, AppEvent::File(_)),
             "FileCloseEvent" => matches!(self, AppEvent::FileClose(_)),
             "NetworkEvent" => matches!(self, AppEvent::Network(_)),
-            "ProcessEvent" => matches!(self, AppEvent::Process(_)),
+            // "ProcessEvent" => matches!(self, AppEvent::Process(_)),
             "PrivilegeEvent" => matches!(self, AppEvent::Privilege(_)),
             "SuspiciousEvent" => matches!(self, AppEvent::Suspicious(_)),
             _ => false,
@@ -130,12 +144,12 @@ impl AppEvent {
 
     pub fn timestamp(&self) -> u64 {
         match self {
-            AppEvent::Exec(e) => e.timestamp,
-            AppEvent::ExecExit(e) => e.timestamp,
-            AppEvent::File(e) => e.timestamp,
-            AppEvent::FileClose(e) => e.timestamp,
-            AppEvent::Network(e) => e.timestamp,
-            AppEvent::Process(e) => e.timestamp,
+            AppEvent::Exec(e) => e.header.timestamp_ns,
+            AppEvent::ExecExit(e) => e.header.timestamp_ns,
+            AppEvent::File(e) => e.header.timestamp_ns,
+            AppEvent::FileClose(e) => e.header.timestamp_ns,
+            AppEvent::Network(e) => e.header.timestamp_ns,
+            // AppEvent::Process(e) => e.timestamp,
             AppEvent::Privilege(e) => e.timestamp,
             AppEvent::Suspicious(e) => e.timestamp,
         }
@@ -143,12 +157,12 @@ impl AppEvent {
 
     pub fn pid(&self) -> u32 {
         match self {
-            AppEvent::Exec(e) => e.pid,
-            AppEvent::ExecExit(e) => e.pid,
-            AppEvent::File(e) => e.pid,
-            AppEvent::FileClose(e) => e.pid,
-            AppEvent::Network(e) => e.pid,
-            AppEvent::Process(e) => e.info.pid,
+            AppEvent::Exec(e) => e.header.pid,
+            AppEvent::ExecExit(e) => e.header.pid,
+            AppEvent::File(e) => e.header.pid,
+            AppEvent::FileClose(e) => e.header.pid,
+            AppEvent::Network(e) => e.header.pid,
+            // AppEvent::Process(e) => e.info.pid,
             AppEvent::Privilege(e) => e.pid,
             AppEvent::Suspicious(e) => e.pid,
         }
@@ -161,7 +175,7 @@ impl AppEvent {
             AppEvent::File(_) => "FileEvent ",
             AppEvent::FileClose(_) => "FileClose ",
             AppEvent::Network(_) => "NetEvent  ",
-            AppEvent::Process(_) => "ProcEvent ",
+            // AppEvent::Process(_) => "ProcEvent ",
             AppEvent::Privilege(_) => "PrivEvent ",
             AppEvent::Suspicious(_) => "Suspicious",
         }
@@ -180,7 +194,8 @@ impl AppEvent {
             }
             AppEvent::File(_) => Severity::Low,
             AppEvent::Network(e) => {
-                if e.port > 30000 {
+                if e.endpoints.local_port > 30000 {
+                    // TODO: recheck this
                     Severity::Medium
                 } else {
                     Severity::Low
@@ -189,36 +204,37 @@ impl AppEvent {
             AppEvent::Exec(_) => Severity::Low,
             AppEvent::ExecExit(_) => Severity::Info,
             AppEvent::FileClose(_) => Severity::Info,
-            AppEvent::Process(_) => Severity::Info,
+            // AppEvent::Process(_) => Severity::Info,
         }
     }
 
     pub fn detail(&self) -> String {
         match self {
             AppEvent::Exec(e) => {
-                format!("exec {}", bytes_to_str(&e.filename))
+                format!("exec {}", &e.filename)
             }
             AppEvent::ExecExit(e) => {
-                format!("pid {} exited", e.pid)
+                format!("pid {} exited", e.header.pid)
             }
             AppEvent::File(e) => {
-                let op = flags_to_op(e.flags);
-                let name = bytes_to_str(&e.filename);
-                format!("{op} {name}  mode={:o}", e.mode)
+                let op = &e.flags;
+                let name = &e.filename;
+                format!("{op} {name}  mode={:?}", &e.file_type)
             }
             AppEvent::FileClose(e) => {
-                format!("close {}", bytes_to_str(&e.file_name))
+                format!("close {}", &e.header.comm)
             }
             AppEvent::Network(e) => {
-                let addr = parse_addr(e.family, &e.addr);
-                format!("→ {addr}  fd={}", e.sockfd)
+                let addr = e.endpoints.remote_ip.to_string(); // TODO: recheck this
+
+                format!("→ {addr}")
             }
-            AppEvent::Process(e) => {
-                format!("{} (ppid={})  {}", e.info.name, e.info.ppid, e.info.cmdline)
-            }
+            // AppEvent::Process(e) => {
+            //     format!("{} (ppid={})  {}", e.info.name, e.info.ppid, e.info.cmdline)
+            // }
             AppEvent::Privilege(e) => {
                 let flag = if e.is_setuid { "setuid" } else { "setgid" };
-                format!("{flag} exec {}", e.binary.display())
+                format!("{flag} exec {}", e.binary)
             }
             AppEvent::Suspicious(e) => {
                 format!("[{}] {}", e.file, e.reason)
