@@ -5,10 +5,7 @@ pub mod parser;
 pub mod ui;
 pub mod write;
 
-use crate::helper::*;
-use bpfx::file::{FileCloseEvent, FileOpenEvent};
-use bpfx::network::AcceptEvent;
-use bpfx::process::{ProcessExitEvent, ProcessStartEvent};
+pub use bpfx::{file::*, network::*, process::*};
 use std::fs::File;
 use std::io::Read;
 use std::io::{BufRead, BufReader};
@@ -114,7 +111,9 @@ impl Severity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(
+    Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub enum AppEvent {
     Exec(ProcessStartEvent),
     ExecExit(ProcessExitEvent),
@@ -218,8 +217,8 @@ impl AppEvent {
             }
             AppEvent::File(e) => {
                 let op = &e.flags;
-                let name = &e.filename;
-                format!("{op} {name}  mode={:?}", &e.file_type)
+                let path = &e.file_path;
+                format!("{op} {path}  mode={:?}", &e.file_type)
             }
             AppEvent::FileClose(e) => {
                 format!("close {}", &e.header.comm)

@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::app::{App, FILTEREVENTS, Focus};
+use crate::app::{App, FILTEREVENTS, Focus, UiEvent};
 use crate::*;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
@@ -70,6 +70,11 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+const TIME_W: usize = 15;
+const SEV_W: usize = 10;
+const PID_W: usize = 17;
+const TYPE_W: usize = 20;
+
 fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = if app.selected_tab == Focus::Stream {
         C_BLUE
@@ -115,11 +120,6 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         C_BG
     };
 
-    const TIME_W: usize = 15;
-    const SEV_W: usize = 10;
-    const PID_W: usize = 17;
-    const TYPE_W: usize = 20;
-
     let line = Line::from(vec![
         Span::raw(" "),
         Span::styled(
@@ -141,30 +141,31 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     if height == 0 {
         return;
     }
+
+    let total = app.filtered_events.len();
+
+    if total == 0 {
+        return;
+    }
+
     let scroll_top = if selected >= height {
         selected - height + 1
     } else {
         0
     };
 
-    let visible_events = app
-        .filtered_events
-        .iter()
-        .enumerate()
-        .skip(scroll_top)
-        .take(height);
+    let mut items: Vec<ListItem> = Vec::with_capacity(height);
+    let end = (scroll_top + height).min(app.filtered_events.len());
 
-    let mut items: Vec<ListItem> = Vec::new();
-
-    for (i, ev_idx) in visible_events {
-        let event: &AppEvent = &app.events[*ev_idx];
-        let sev = event.severity();
+    for (i, &ev_idx) in app.filtered_events[scroll_top..end].iter().enumerate() {
+        let event: &UiEvent = &app.events[ev_idx];
+        let sev = &event.severity;
         let is_sel = i == selected;
         let sev_col = sev_color(&sev);
-        let ts = format_timestamp_ns(event.timestamp(), app.twle_hr_format);
-        let pid = event.pid();
-        let kind = event.kind_label();
-        let detail = event.detail();
+        let ts = &event.timestamp;
+        let pid = event.event.pid();
+        let kind = event.kind;
+        let detail = &event.detail;
         let border_char = if is_sel { "▶" } else { " " };
         let bg = if is_sel { C_BG3 } else { C_BG };
 
@@ -231,8 +232,8 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, selected: usize, total: usize
     }
 }
 
-fn detail_color(event: &AppEvent) -> Color {
-    match event.severity() {
+fn detail_color(event: &UiEvent) -> Color {
+    match event.severity {
         Severity::Critical => C_RED,
         Severity::High => Color::Rgb(255, 160, 100),
         _ => C_TEXT,
@@ -388,28 +389,27 @@ fn family_label(family: u16) -> &'static str {
     }
 }
 
-fn build_detail_lines(event: &AppEvent, app: &App) -> Text<'static> {
+fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let sev = event.severity();
+
+    let sev = &event.severity;
     let sev_col = sev_color(&sev);
+
     lines.push(Line::from(vec![
         Span::styled(
             sev.label().to_string(),
             Style::default().fg(sev_col).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
-        Span::styled(
-            event.kind_label().trim().to_string(),
-            Style::default().fg(C_PURPLE),
-        ),
+        Span::styled(event.kind.trim().to_string(), Style::default().fg(C_PURPLE)),
     ]));
     lines.push(Line::from(Span::styled(
-        format_timestamp_ns(event.timestamp(), app.twle_hr_format),
+        event.timestamp.clone(),
         Style::default().fg(C_MUTED),
     )));
     lines.push(Line::from(""));
 
-    match event {
+    match &event.event {
         AppEvent::Exec(e) => {
             section(&mut lines, "PROCESS");
             kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
@@ -427,6 +427,7 @@ fn build_detail_lines(event: &AppEvent, app: &App) -> Text<'static> {
         }
         AppEvent::File(e) => {
             section(&mut lines, "PROCESS");
+            kv(&mut lines, "name", &e.header.comm, C_TEXT);
             kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
             kv(
                 &mut lines,
@@ -437,13 +438,14 @@ fn build_detail_lines(event: &AppEvent, app: &App) -> Text<'static> {
             lines.push(Line::from(""));
             section(&mut lines, "FILE");
             let op = &e.file_type;
-            let name = &e.filename;
-            let path_col = if crate::helper::is_sensitive_path(&name) {
+            let file_name = &e.file_name().to_string();
+            let file_path = &e.file_path;
+            let path_col = if crate::helper::is_sensitive_path(file_path) {
                 C_RED
             } else {
                 C_PATH
             };
-            kv(&mut lines, "name", &name, path_col);
+            kv(&mut lines, "filepath ", &file_path, path_col);
             kv(&mut lines, "op", &format!("{op:?}"), C_TEXT);
             kv(&mut lines, "flags", &format!("{:#010x}", e.flags), C_MUTED);
             kv(&mut lines, "mode", &format!("{:?}", e.file_type), C_MUTED);

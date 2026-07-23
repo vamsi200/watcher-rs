@@ -5,12 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
-aya = "0.13.1"
-aya-ebpf = "0.1.1"
-aya-ebpf-macros = "0.1.2"
-aya-log = "0.2.1"
-aya-log-ebpf = "0.1.0"
-bpfx = {path = "/home/vamsi/scripts/bpfx/"}
+bpfx = {path = "/home/vamsi/scripts/bpfx/", features = ["archive"]}
 chrono = "0.4.44"
 color-eyre = "0.6.5"
 crossterm = "0.29.0"

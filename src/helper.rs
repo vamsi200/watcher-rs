@@ -5,6 +5,9 @@ use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Local};
 use nix::time::{ClockId, clock_gettime};
+use ratatui::text::ToLine;
+
+use crate::app::App;
 
 pub fn parse_addr(family: u16, addr: &[u8; 16]) -> String {
     match family {
@@ -52,14 +55,8 @@ pub fn flags_to_op(flags: i32) -> &'static str {
     }
 }
 
-pub fn format_timestamp_ns(ns: u64, use_24hr: bool) -> String {
-    let realtime_ns = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
-    let mono = clock_gettime(ClockId::CLOCK_MONOTONIC).unwrap();
-    let mono_ns = mono.tv_sec() as u64 * 1_000_000_000 + mono.tv_nsec() as u64;
-    let wallclock_ns = realtime_ns - mono_ns + ns;
+pub fn format_timestamp_ns(ns: u64, use_24hr: bool, wallclock_ns: u64) -> String {
+    let wallclock_ns = wallclock_ns + ns;
     let secs = (wallclock_ns / 1_000_000_000) as i64;
     let nanos = (wallclock_ns % 1_000_000_000) as u32;
 

@@ -1,27 +1,61 @@
 #![allow(unused)]
 use crate::AppEvent;
 use crate::Severity;
+use crate::helper::format_timestamp_ns;
 use crate::parser::detect_input_device_access;
 use crate::parser::detect_suspicious_file_access;
 use crate::parser::detect_suspicious_network;
 use crate::ui::*;
+use crate::write::write_to_disk;
 // use crate::write::write_to_disk;
 use color_eyre::config::FilterCallback;
 use crossterm::event::ModifierKeyCode;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use futures::SinkExt;
+use futures::channel::mpsc::Sender;
 use libc::setspent;
+use nix::time::ClockId;
+use nix::time::clock_gettime;
 use ratatui::{DefaultTerminal, widgets::ScrollbarState};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::watch;
+
+#[derive(Debug, Clone)]
+pub struct UiEvent {
+    pub event: AppEvent,
+    pub detail: String,
+    pub kind: &'static str,
+    pub timestamp: String,
+    pub severity: Severity,
+}
+
+impl UiEvent {
+    pub fn new(ev: AppEvent, twle_hr_format: bool, wallclock_ns: u64) -> Self {
+        let detail = ev.detail();
+        let kind = ev.kind_label();
+        let timestamp = format_timestamp_ns(ev.timestamp(), twle_hr_format, wallclock_ns);
+        let severity = ev.severity();
+
+        UiEvent {
+            event: ev,
+            detail,
+            kind,
+            timestamp,
+            severity,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct App {
     pub running: bool,
-    pub events: Vec<AppEvent>,
+    pub events: Vec<UiEvent>,
     pub alert: Option<String>,
     pub crit_ev_count: usize,
     pub high_ev_count: usize,
@@ -34,7 +68,7 @@ pub struct App {
     pub vertical_scroll: usize,
     pub selected_tab: Focus,
     pub selected: usize,
-    pub selected_event: Option<AppEvent>,
+    pub selected_event: Option<UiEvent>,
     pub filtered_events: Vec<usize>,
     pub searching: bool,
     pub search_query: String,
@@ -46,6 +80,7 @@ pub struct App {
     pub twle_hr_format: bool,
     pub pid_conn_counts: HashMap<u32, (usize, u64)>,
     pub pid_ports_seen: HashMap<u32, HashSet<u16>>,
+    pub wallclock_offset_ns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,7 +95,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             running: true,
-            events: Vec::new(),
+            events: Vec::with_capacity(10),
             alert: None,
             crit_ev_count: 0,
             high_ev_count: 0,
@@ -73,7 +108,7 @@ impl Default for App {
             vertical_scroll: 0,
             selected_tab: Focus::Stream,
             selected_event: None,
-            filtered_events: Vec::new(),
+            filtered_events: Vec::with_capacity(10),
             selected: 0,
             searching: false,
             search_query: String::new(),
@@ -85,6 +120,7 @@ impl Default for App {
             twle_hr_format: false,
             pid_conn_counts: HashMap::new(),
             pid_ports_seen: HashMap::new(),
+            wallclock_offset_ns: 0,
         }
     }
 }
@@ -112,30 +148,50 @@ impl App {
             self.event_name.push_str("All");
         }
 
-        if ev.matches_filter(&self.event_name) {
-            match ev.severity() {
-                Severity::Critical => self.crit_ev_count += 1,
-                Severity::High => self.high_ev_count += 1,
-                Severity::Medium => self.med_ev_count += 1,
-                Severity::Low => self.low_ev_count += 1,
-                Severity::Info => self.info_ev_count += 1,
-            }
+        if !ev.matches_filter(&self.event_name) {
+            return;
+        }
 
-            self.events.push(ev.clone());
-            // write_to_disk(ev).unwrap();
-            self.filtered_events.push(self.events.len() - 1);
-            self.search_events();
+        match ev.severity() {
+            Severity::Critical => self.crit_ev_count += 1,
+            Severity::High => self.high_ev_count += 1,
+            Severity::Medium => self.med_ev_count += 1,
+            Severity::Low => self.low_ev_count += 1,
+            Severity::Info => self.info_ev_count += 1,
+        }
+
+        let idx = self.events.len();
+        let ev = UiEvent::new(ev, self.twle_hr_format, self.wallclock_offset_ns);
+        self.events.push(ev);
+
+        let ev = &self.events[idx];
+
+        if self.search_query.is_empty() || match_query(ev, &self.search_query.to_ascii_lowercase())
+        {
+            self.filtered_events.push(idx);
+        }
+
+        if self.filtered_events.is_empty() {
+            self.selected = 0;
+        } else {
+            self.selected = self.selected.min(self.filtered_events.len() - 1);
         }
     }
 
     pub fn search_events(&mut self) {
-        self.filtered_events = self
-            .events
-            .iter()
-            .enumerate()
-            .filter(|(x, s)| match_query(&s, &self.search_query))
-            .map(|(x, _)| x)
-            .collect();
+        self.filtered_events.clear();
+
+        for (i, ev) in self.events.iter().enumerate() {
+            if self.search_query.to_ascii_lowercase().is_empty()
+                || match_query(ev, &self.search_query)
+            {
+                self.filtered_events.push(i);
+            }
+        }
+
+        self.selected = self
+            .selected
+            .min(self.filtered_events.len().saturating_sub(1));
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -182,7 +238,7 @@ impl App {
                 KeyCode::Enter => {
                     let fv = FILTEREVENTS.get(self.event_idx).unwrap_or(&"All");
                     self.event_name.clear();
-                    self.event_name.push_str(*fv);
+                    self.event_name.push_str(fv);
                     self.filter_mode = false;
                     self.selected_tab = Focus::Stream;
                 }
@@ -256,41 +312,24 @@ impl App {
         mut self,
         mut terminal: DefaultTerminal,
         mut rx: Receiver<AppEvent>,
+        mut sh_tx: watch::Sender<bool>,
     ) -> color_eyre::Result<()> {
         let mut last_tick = std::time::Instant::now();
         let tick_rate = Duration::from_millis(50);
         // let mut events_map: VecDeque<FileEvent> = VecDeque::new();
 
+        let realtime_ns = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mono = clock_gettime(ClockId::CLOCK_MONOTONIC).unwrap();
+        let mono_ns = mono.tv_sec() as u64 * 1_000_000_000 + mono.tv_nsec() as u64;
+
+        self.wallclock_offset_ns = mono_ns;
+
         while self.running {
             while let Ok(event) = rx.try_recv() {
                 if !self.pause {
-                    match &event {
-                        AppEvent::Network(ne) => {
-                            let s_events = detect_suspicious_network(
-                                &ne,
-                                &mut self.pid_conn_counts,
-                                &mut self.pid_ports_seen,
-                            );
-                            for event in s_events {
-                                self.push(AppEvent::Suspicious(event));
-                            }
-                        }
-                        // AppEvent::File(fe) => {
-                        //     events_map.push_back(fe.clone());
-                        //     let f_events = detect_suspicious_file_access(&mut events_map);
-                        //     let i_events = detect_input_device_access(&mut events_map);
-                        //
-                        //     for event in f_events {
-                        //         self.push(AppEvent::Suspicious(event));
-                        //     }
-                        //
-                        //     for event in i_events {
-                        //         self.push(AppEvent::Suspicious(event));
-                        //     }
-                        // }
-                        _ => {}
-                    };
-
                     self.push(event);
                 }
             }
@@ -311,6 +350,9 @@ impl App {
                     self.handle_key(key);
                 }
             }
+        }
+        if !self.running {
+            sh_tx.send(true);
         }
         Ok(())
     }
@@ -343,24 +385,7 @@ impl App {
         self.search_events();
     }
 
-    // pub fn scroll_right(&mut self) {
-    //     self.horizontal_scroll = self.vertical_scroll.saturating_add(1);
-    //     self.update_scroll_bar_state();
-    // }
-    //
-    // pub fn scroll_left(&mut self) {
-    //     self.vertical_scroll = self.vertical_scroll.saturating_sub(1);
-    //     self.update_scroll_bar_state();
-    // }
-    //
-    // pub fn update_scroll_bar_state(&mut self) {
-    //     self.vertical_scroll_state = self.vertical_scroll_state.position(self.vertical_scroll);
-    //     self.horizontal_scroll_state = self
-    //         .horizontal_scroll_state
-    //         .position(self.horizontal_scroll);
-    // }
-
-    pub fn selected_event(&self) -> Option<&AppEvent> {
+    pub fn selected_event(&self) -> Option<&UiEvent> {
         self.filtered_events
             .get(self.selected)
             .and_then(|&idx| self.events.get(idx))
@@ -373,9 +398,13 @@ impl App {
     }
 }
 
-pub fn match_query(e: &AppEvent, st: &str) -> bool {
-    let detail = e.detail().to_lowercase();
-    let kind = e.kind_label().to_lowercase();
-    let pid = e.pid().to_string();
-    detail.contains(st) || kind.contains(st) || pid.contains(st)
+pub fn match_query(e: &UiEvent, st: &str) -> bool {
+    let detail = &e.detail;
+    let kind = e.kind;
+    if st.bytes().all(|b| b.is_ascii_digit()) {
+        if e.event.pid().to_string().contains(st) {
+            return true;
+        }
+    }
+    detail.contains(st) || kind.contains(st)
 }

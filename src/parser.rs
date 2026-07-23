@@ -3,12 +3,6 @@ use crate::helper::{bytes_to_str, is_root_only_path, parse_addr};
 use crate::*;
 use anyhow::Error;
 use anyhow::Result;
-use aya::{
-    Btf, Ebpf, include_bytes_aligned,
-    maps::{MapData, RingBuf},
-    programs::{FEntry, TracePoint},
-};
-use aya_log::EbpfLogger;
 use bpfx::NetworkEvent;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::{
@@ -206,13 +200,13 @@ const SUSPICIOUS_INPUT_FLAGS: &[(i32, &str)] = &[
 const HIGH_READ_THRESHOLD: usize = 200;
 const MED_READ_THRESHOLD: usize = 80;
 
-// TODO: Test and refine the approach
+// TODO: Test and refine the approach and reduce allocations
 pub fn detect_suspicious_file_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<SuspiciousEvent> {
     let mut suspicious = Vec::new();
     let mut pid_access_counts: HashMap<u32, (usize, u64)> = HashMap::new();
 
     if let Some(event) = events.pop_front() {
-        let filename = event.filename;
+        let filename = event.file_name();
 
         if let Some(matched_path) = SENSITIVE_PATHS.iter().find(|&&p| filename.starts_with(p)) {
             let severity = if matches!(*matched_path, "/etc/shadow" | "/.ssh/" | "/etc/sudoers") {
@@ -224,7 +218,7 @@ pub fn detect_suspicious_file_access(events: &mut VecDeque<FileOpenEvent>) -> Ve
             suspicious.push(SuspiciousEvent {
                 pid: event.header.pid,
                 reason: format!("Access to sensitive path: {}", filename),
-                file: filename.clone(),
+                file: filename.to_string(),
                 severity,
                 timestamp: event.header.timestamp_ns,
             });
@@ -237,7 +231,7 @@ pub fn detect_suspicious_file_access(events: &mut VecDeque<FileOpenEvent>) -> Ve
                     "Non-root UID {} accessing privileged path: {}",
                     event.header.uid, filename
                 ),
-                file: filename.clone(),
+                file: filename.to_string(),
                 severity: Severity::High,
                 timestamp: event.header.timestamp_ns,
             });
@@ -249,7 +243,7 @@ pub fn detect_suspicious_file_access(events: &mut VecDeque<FileOpenEvent>) -> Ve
                 suspicious.push(SuspiciousEvent {
                     pid: event.header.pid,
                     reason: format!("Suspicious open flags on '{}': {}", filename, description),
-                    file: filename.clone(),
+                    file: filename.to_string(),
                     severity: Severity::Medium,
                     timestamp: event.header.timestamp_ns,
                 });
@@ -275,7 +269,7 @@ pub fn detect_suspicious_file_access(events: &mut VecDeque<FileOpenEvent>) -> Ve
                     "High-frequency file access: {} accesses in 1s window",
                     access_count
                 ),
-                file: filename.clone(),
+                file: filename.to_string(),
                 severity: Severity::High,
                 timestamp: event.header.timestamp_ns,
             });
@@ -286,7 +280,7 @@ pub fn detect_suspicious_file_access(events: &mut VecDeque<FileOpenEvent>) -> Ve
                     "Elevated file access rate: {} accesses in 1s window",
                     access_count
                 ),
-                file: filename.clone(),
+                file: filename.to_string(),
                 severity: Severity::Medium,
                 timestamp: event.header.timestamp_ns,
             });
@@ -438,7 +432,7 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<S
     let mut pid_devices_seen: HashMap<u32, HashSet<String>> = HashMap::new();
 
     while let Some(event) = events.pop_front() {
-        let filename = &event.filename;
+        let filename = event.file_name().to_string();
 
         let device_match = INPUT_DEVICE_PATHS
             .iter()
@@ -450,7 +444,7 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<S
 
         suspicious.push(SuspiciousEvent {
             pid: event.header.pid,
-            file: filename.clone(),
+            file: filename.to_string(),
             reason: description.to_string(),
             severity: match sev {
                 Severity::Critical => Severity::Critical,
@@ -465,7 +459,7 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<S
         if event.header.uid != 0 {
             suspicious.push(SuspiciousEvent {
                 pid: event.header.pid,
-                file: filename.clone(),
+                file: filename.to_string(),
                 reason: format!(
                     "Non-root UID {} reading raw input device - possible keylogger",
                     event.header.uid
@@ -480,7 +474,7 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<S
                 //TODO: fix this
                 suspicious.push(SuspiciousEvent {
                     pid: event.header.pid,
-                    file: filename.clone(),
+                    file: filename.to_string(),
                     reason: format!("{} on '{}'", reason, filename),
                     severity: Severity::High,
                     timestamp: event.header.timestamp_ns,
@@ -492,7 +486,7 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<S
         if u32::from(event.file_type.clone()) & 0o4000 != 0 {
             suspicious.push(SuspiciousEvent {
                 pid: event.header.pid,
-                file: filename.clone(),
+                file: filename.to_string(),
                 reason: format!("SUID bit set on input device access '{}'", filename),
                 severity: Severity::High,
                 timestamp: event.header.timestamp_ns,
@@ -501,7 +495,7 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<S
         if u32::from(event.file_type) & 0o2000 != 0 {
             suspicious.push(SuspiciousEvent {
                 pid: event.header.pid,
-                file: filename.clone(),
+                file: filename.to_string(),
                 reason: format!("SGID bit set on input device access '{}'", filename),
                 severity: Severity::Medium,
                 timestamp: event.header.timestamp_ns,
@@ -522,7 +516,7 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<S
         if count == HIGH_READ_THRESHOLD {
             suspicious.push(SuspiciousEvent {
                 pid: event.header.pid,
-                file: filename.clone(),
+                file: filename.to_string(),
                 reason: format!(
                     "High-frequency input device polling: {} reads/s - likely a keylogger",
                     count
@@ -533,7 +527,7 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<S
         } else if count == MED_READ_THRESHOLD {
             suspicious.push(SuspiciousEvent {
                 pid: event.header.pid,
-                file: filename.clone(),
+                file: filename.to_string(),
                 reason: format!("Elevated input device polling: {} reads/s", count),
                 severity: Severity::Medium,
                 timestamp: event.header.timestamp_ns,
@@ -541,12 +535,12 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<S
         }
 
         let devices = pid_devices_seen.entry(event.header.pid).or_default();
-        devices.insert(filename.clone());
+        devices.insert(filename.to_string());
 
         if devices.len() == 5 {
             suspicious.push(SuspiciousEvent {
                 pid: event.header.pid,
-                file: filename.clone(),
+                file: filename.to_string(),
                 reason: format!(
                     "PID {} accessing {} distinct input devices - scraping all inputs",
                     event.header.pid,
@@ -560,7 +554,7 @@ pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<S
         // if event.dir_fd != libc::AT_FDCWD && event.dir_fd < 0 {
         //     suspicious.push(SuspiciousEvent {
         //         pid: event.header.pid,
-        //         file: filename.clone(),
+        //         file: filename.to_string(),
         //         reason: format!(
         //             "Invalid dir_fd {} used to open input device '{}'",
         //             event.dir_fd, filename
