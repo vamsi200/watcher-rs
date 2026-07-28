@@ -2,20 +2,22 @@
 use crate::AppEvent;
 use crate::Severity;
 use crate::helper::format_timestamp_ns;
-use crate::parser::detect_input_device_access;
-use crate::parser::detect_suspicious_file_access;
-use crate::parser::detect_suspicious_network;
 use crate::ui::*;
 use crate::write::write_to_disk;
-// use crate::write::write_to_disk;
 use color_eyre::config::FilterCallback;
 use crossterm::event::ModifierKeyCode;
+use crossterm::event::MouseButton;
+use crossterm::event::MouseEvent;
+use crossterm::event::MouseEventKind;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::terminal::LeaveAlternateScreen;
 use futures::SinkExt;
-use futures::channel::mpsc::Sender;
 use libc::setspent;
 use nix::time::ClockId;
 use nix::time::clock_gettime;
+use ratatui::layout::Position;
+use ratatui::layout::Rect;
+use ratatui::widgets::ListState;
 use ratatui::{DefaultTerminal, widgets::ScrollbarState};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -24,7 +26,13 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
+
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::execute;
+
+const EVENT_BATCH_SIZE: usize = 1024;
 
 #[derive(Debug, Clone)]
 pub struct UiEvent {
@@ -81,6 +89,10 @@ pub struct App {
     pub pid_conn_counts: HashMap<u32, (usize, u64)>,
     pub pid_ports_seen: HashMap<u32, HashSet<u16>>,
     pub wallclock_offset_ns: u64,
+    pub filter_state: ListState,
+    pub stream_state: ListState,
+    pub filter_area: Rect,
+    pub stream_area: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,8 +133,58 @@ impl Default for App {
             pid_conn_counts: HashMap::new(),
             pid_ports_seen: HashMap::new(),
             wallclock_offset_ns: 0,
+            filter_state: ListState::default(),
+            filter_area: Rect::default(),
+            stream_area: Rect::default(),
+            stream_state: ListState::default(),
         }
     }
+}
+
+pub async fn writer_thread(mut receiver: Receiver<AppEvent>) -> anyhow::Result<()> {
+    let mut batch = Vec::with_capacity(1024);
+    while let Some(event) = receiver.recv().await {
+        batch.push(event);
+
+        if batch.len() >= 1024 {
+            write_to_disk(&batch)?;
+            batch.clear();
+        }
+    }
+    Ok(())
+}
+
+fn row_at(area: Rect, col: u16, row: u16) -> Option<usize> {
+    if !area.contains(Position::new(col, row)) {
+        return None;
+    }
+
+    let rel = row - area.y;
+
+    if rel == 0 {
+        return None;
+    }
+
+    let idx = (rel - 1) as usize;
+
+    (idx < SEVERITY_FILTERS.len()).then_some(idx)
+}
+
+fn row_at_stream(app: &App, col: u16, row: u16) -> Option<usize> {
+    let area = app.stream_area;
+    if !area.contains(Position::new(col, row)) {
+        return None;
+    }
+
+    let rel = row - area.y;
+
+    if rel == 0 {
+        return None;
+    }
+
+    let idx = (rel - 1) as usize;
+
+    (idx < app.filtered_events.len()).then_some(idx)
 }
 
 pub const FILTEREVENTS: [&str; 10] = [
@@ -160,21 +222,24 @@ impl App {
             Severity::Info => self.info_ev_count += 1,
         }
 
-        let idx = self.events.len();
         let ev = UiEvent::new(ev, self.twle_hr_format, self.wallclock_offset_ns);
-        self.events.push(ev);
 
-        let ev = &self.events[idx];
-
-        if self.search_query.is_empty() || match_query(ev, &self.search_query.to_ascii_lowercase())
+        if self
+            .filter_state
+            .selected()
+            .is_none_or(|i| ev.severity == SEVERITY_FILTERS[i].0)
         {
-            self.filtered_events.push(idx);
-        }
+            let idx = self.events.len();
+            self.events.push(ev);
 
-        if self.filtered_events.is_empty() {
-            self.selected = 0;
-        } else {
-            self.selected = self.selected.min(self.filtered_events.len() - 1);
+            if self.search_query.is_empty() || match_query(&self.events[idx], &self.search_query) {
+                self.filtered_events.push(idx);
+            }
+            if self.filtered_events.is_empty() {
+                self.selected = 0;
+            } else {
+                self.selected = self.selected.min(self.filtered_events.len() - 1);
+            }
         }
     }
 
@@ -182,9 +247,7 @@ impl App {
         self.filtered_events.clear();
 
         for (i, ev) in self.events.iter().enumerate() {
-            if self.search_query.to_ascii_lowercase().is_empty()
-                || match_query(ev, &self.search_query)
-            {
+            if self.search_query.is_empty() || match_query(ev, &self.search_query) {
                 self.filtered_events.push(i);
             }
         }
@@ -192,6 +255,49 @@ impl App {
         self.selected = self
             .selected
             .min(self.filtered_events.len().saturating_sub(1));
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(idx) = row_at(self.filter_area, mouse.column, mouse.row) {
+                    if self.filter_state.selected() == Some(idx) {
+                        self.filter_state.select(None);
+                    } else {
+                        self.filter_state.select(Some(idx));
+                    }
+                }
+            }
+
+            _ => {}
+        }
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(idx) = row_at_stream(self, mouse.column, mouse.row) {
+                    self.stream_state.select(Some(idx));
+                }
+            }
+
+            MouseEventKind::ScrollDown => {
+                let next = self
+                    .stream_state
+                    .selected()
+                    .unwrap_or(0)
+                    .saturating_add(1)
+                    .min(self.filtered_events.len() - 1);
+
+                self.stream_state.select(Some(next));
+            }
+
+            MouseEventKind::ScrollUp => {
+                let next = self.stream_state.selected().unwrap_or(0).saturating_sub(1);
+
+                self.stream_state.select(Some(next));
+            }
+
+            _ => {}
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -272,7 +378,7 @@ impl App {
             }
             KeyCode::Char('g') => {
                 if self.g_char {
-                    self.selected = 0;
+                    self.stream_state.select(Some(0));
                     self.g_char = false;
                 } else {
                     self.g_char = true;
@@ -280,7 +386,8 @@ impl App {
             }
             KeyCode::Char('G') => {
                 if !self.filtered_events.is_empty() {
-                    self.selected = self.filtered_events.len() - 1;
+                    self.stream_state
+                        .select(Some(self.filtered_events.len() - 1));
                 }
             }
             KeyCode::Char('q') => self.running = false,
@@ -302,34 +409,35 @@ impl App {
         }
     }
 
-    pub fn handle_ev_key(&mut self, key: KeyEvent) {
-        match key.code {
-            _ => {}
-        }
-    }
+    // pub fn handle_ev_key(&mut self, key: KeyEvent) {
+    //     match key.code {
+    //         _ => {}
+    //     }
+    // }
 
-    pub fn run(
+    pub async fn run(
         mut self,
         mut terminal: DefaultTerminal,
         mut rx: Receiver<AppEvent>,
         mut sh_tx: watch::Sender<bool>,
+        mut writer_tx: Sender<AppEvent>,
     ) -> color_eyre::Result<()> {
         let mut last_tick = std::time::Instant::now();
         let tick_rate = Duration::from_millis(50);
-        // let mut events_map: VecDeque<FileEvent> = VecDeque::new();
 
         let realtime_ns = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)?
             .as_nanos() as u64;
-        let mono = clock_gettime(ClockId::CLOCK_MONOTONIC).unwrap();
+
+        let mono = clock_gettime(ClockId::CLOCK_MONOTONIC)?;
         let mono_ns = mono.tv_sec() as u64 * 1_000_000_000 + mono.tv_nsec() as u64;
 
-        self.wallclock_offset_ns = mono_ns;
+        self.wallclock_offset_ns = realtime_ns - mono_ns;
 
         while self.running {
             while let Ok(event) = rx.try_recv() {
                 if !self.pause {
+                    writer_tx.send(event.clone()).await?;
                     self.push(event);
                 }
             }
@@ -346,28 +454,48 @@ impl App {
                 .unwrap_or(Duration::ZERO);
 
             if event::poll(timeout)? {
-                if let Event::Key(key) = event::read()? {
-                    self.handle_key(key);
+                match event::read()? {
+                    Event::Key(key) => self.handle_key(key),
+                    Event::Mouse(mev) => self.handle_mouse(mev),
+                    _ => {}
                 }
             }
         }
         if !self.running {
+            execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            )?;
             sh_tx.send(true);
         }
         Ok(())
     }
 
     pub fn scroll_up(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-        }
+        let next = self.stream_state.selected().unwrap_or(0).saturating_sub(1);
+
+        self.stream_state.select(Some(next));
         self.get_selected();
     }
 
     pub fn scroll_down(&mut self) {
-        if self.selected + 1 < self.filtered_events.len() {
-            self.selected += 1;
+        let len = self.filtered_events.len();
+
+        if len == 0 {
+            self.stream_state.select(None);
+            self.selected_event = None;
+            return;
         }
+
+        let next = self
+            .stream_state
+            .selected()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .min(len - 1);
+
+        self.stream_state.select(Some(next));
         self.get_selected();
     }
 
@@ -387,13 +515,20 @@ impl App {
 
     pub fn selected_event(&self) -> Option<&UiEvent> {
         self.filtered_events
-            .get(self.selected)
+            .get(self.stream_state.selected().unwrap_or(0))
             .and_then(|&idx| self.events.get(idx))
     }
 
     pub fn get_selected(&mut self) {
-        if let Some(&idx) = self.filtered_events.get(self.selected) {
-            self.selected_event = self.events.get(idx).cloned()
+        let Some(selected) = self.stream_state.selected() else {
+            self.selected_event = None;
+            return;
+        };
+
+        if let Some(&idx) = self.filtered_events.get(selected) {
+            self.selected_event = self.events.get(idx).cloned();
+        } else {
+            self.selected_event = None;
         }
     }
 }

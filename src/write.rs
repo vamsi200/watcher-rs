@@ -85,6 +85,6 @@ fn test_write() {
 
     // write_to_disk(&events).unwrap();
     // write_to_disk(ev2).unwrap();
-    panic!("{:#?}", read_from_log(&events));
+    panic!("{:#?}", read_from_log(&events).unwrap().len());
     // assert_eq!(true, read_from_log(&ev).is_ok());
 }

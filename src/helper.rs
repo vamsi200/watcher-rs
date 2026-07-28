@@ -71,6 +71,30 @@ pub fn format_timestamp_ns(ns: u64, use_24hr: bool, wallclock_ns: u64) -> String
     }
 }
 
+pub fn check_path(path: &str) -> bool {
+    if path.starts_with("/etc/passwd")
+        || path.starts_with("/etc/shadow")
+        || path.starts_with("/etc/sudoers")
+        || path.starts_with("/etc/crontab")
+        || path.starts_with("/etc/cron")
+        || path.starts_with("/root/")
+        || path.starts_with("/proc/")
+        || path.starts_with("/sys/")
+        || path.starts_with("/.ssh/")
+    {
+        return true;
+    }
+
+    if path.starts_with("/boot/")
+        || path.starts_with("/sys/kernel/security/")
+        || path.starts_with("/proc/kcore")
+    {
+        return true;
+    }
+
+    false
+}
+
 pub fn is_sensitive_path(path: &str) -> bool {
     const SENSITIVE: &[&str] = &[
         "/etc/passwd",

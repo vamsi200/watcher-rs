@@ -6,65 +6,30 @@ pub mod ui;
 pub mod write;
 
 pub use bpfx::{file::*, network::*, process::*};
-use std::fs::File;
-use std::io::Read;
-use std::io::{BufRead, BufReader};
+use std::fs::read_link;
+use std::path::PathBuf;
 
-#[derive(
-    Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-)]
+use crate::detection::ClassifiedFileEvent;
+
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct ProcessInfo {
-    pub pid: u32,
-    pub ppid: u32,
-    pub name: String,
-    pub cmdline: String,
-}
-
-impl ProcessInfo {
-    pub fn get_process_info_from_pid(i_pid: u32) -> Self {
-        let mut cmdline = String::new();
-        let mut ppid = 0u32;
-        let mut pid = 0u32;
-        let mut name = String::new();
-
-        if let Ok(file) = File::open(format!("/proc/{}/status", i_pid)) {
-            let reader = BufReader::new(file);
-            for line in reader.lines() {
-                let line = line.unwrap_or_default();
-                let split: Vec<&str> = line.trim().split(":").collect();
-                if split.len() >= 2 {
-                    match split[0] {
-                        "Pid" => pid = split[1].trim().parse().unwrap_or_default(),
-                        "PPid" => ppid = split[1].trim().parse().unwrap_or_default(),
-                        "Name" => name.push_str(split[1].trim()),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        if let Ok(mut file) = File::open(format!("/proc/{}/cmdline", pid)) {
-            file.read_to_string(&mut cmdline).unwrap_or_default();
-            cmdline = cmdline.replace('\0', "");
-        }
-
-        Self {
-            pid,
-            ppid,
-            name,
-            cmdline,
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-)]
-pub struct ProcessEvent {
-    pub info: ProcessInfo,
     pub uid: u32,
-    pub timestamp: u64,
+    pub exe: PathBuf,
+    pub comm: String,
 }
+
+pub fn get_exe(pid: u32) -> PathBuf {
+    read_link(format!("/proc/{}/exe", pid)).unwrap_or_default()
+}
+
+// #[derive(
+//     Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+// )]
+// pub struct ProcessEvent {
+//     pub info: ProcessInfo,
+//     pub uid: u32,
+//     pub timestamp: u64,
+// }
 
 #[derive(
     Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
@@ -89,7 +54,16 @@ pub struct SuspiciousEvent {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    PartialOrd,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Copy,
+    Eq,
+    Ord,
 )]
 pub enum Severity {
     Info,
@@ -117,12 +91,10 @@ impl Severity {
 pub enum AppEvent {
     Exec(ProcessStartEvent),
     ExecExit(ProcessExitEvent),
-    File(FileOpenEvent),
+    File(ClassifiedFileEvent),
     FileClose(FileCloseEvent),
     Network(AcceptEvent),
     // Process(ProcessEvent),
-    Privilege(PrivilegeEvent),
-    Suspicious(SuspiciousEvent),
 }
 
 impl AppEvent {
@@ -135,8 +107,6 @@ impl AppEvent {
             "FileCloseEvent" => matches!(self, AppEvent::FileClose(_)),
             "NetworkEvent" => matches!(self, AppEvent::Network(_)),
             // "ProcessEvent" => matches!(self, AppEvent::Process(_)),
-            "PrivilegeEvent" => matches!(self, AppEvent::Privilege(_)),
-            "SuspiciousEvent" => matches!(self, AppEvent::Suspicious(_)),
             _ => false,
         }
     }
@@ -145,12 +115,10 @@ impl AppEvent {
         match self {
             AppEvent::Exec(e) => e.header.timestamp_ns,
             AppEvent::ExecExit(e) => e.header.timestamp_ns,
-            AppEvent::File(e) => e.header.timestamp_ns,
+            AppEvent::File(e) => e.event.header.timestamp_ns,
             AppEvent::FileClose(e) => e.header.timestamp_ns,
             AppEvent::Network(e) => e.header.timestamp_ns,
             // AppEvent::Process(e) => e.timestamp,
-            AppEvent::Privilege(e) => e.timestamp,
-            AppEvent::Suspicious(e) => e.timestamp,
         }
     }
 
@@ -158,12 +126,10 @@ impl AppEvent {
         match self {
             AppEvent::Exec(e) => e.header.pid,
             AppEvent::ExecExit(e) => e.header.pid,
-            AppEvent::File(e) => e.header.pid,
+            AppEvent::File(e) => e.event.header.pid,
             AppEvent::FileClose(e) => e.header.pid,
             AppEvent::Network(e) => e.header.pid,
             // AppEvent::Process(e) => e.info.pid,
-            AppEvent::Privilege(e) => e.pid,
-            AppEvent::Suspicious(e) => e.pid,
         }
     }
 
@@ -175,26 +141,15 @@ impl AppEvent {
             AppEvent::FileClose(_) => "FileClose ",
             AppEvent::Network(_) => "NetEvent  ",
             // AppEvent::Process(_) => "ProcEvent ",
-            AppEvent::Privilege(_) => "PrivEvent ",
-            AppEvent::Suspicious(_) => "Suspicious",
         }
     }
 
     // just for testing..
     pub fn severity(&self) -> Severity {
         match self {
-            AppEvent::Suspicious(e) => e.severity.clone(),
-            AppEvent::Privilege(e) => {
-                if e.is_setuid {
-                    Severity::High
-                } else {
-                    Severity::Medium
-                }
-            }
-            AppEvent::File(_) => Severity::Low,
+            AppEvent::File(e) => e.severity,
             AppEvent::Network(e) => {
                 if e.endpoints.local_port > 30000 {
-                    // TODO: recheck this
                     Severity::Medium
                 } else {
                     Severity::Low
@@ -216,9 +171,10 @@ impl AppEvent {
                 format!("pid {} exited", e.header.pid)
             }
             AppEvent::File(e) => {
-                let op = &e.flags;
-                let path = &e.file_path;
-                format!("{op} {path}  mode={:?}", &e.file_type)
+                // let op = &e.event.flags();
+                // let path = &e.event.file_path;
+
+                format!("file_path={}", e.event.file_path)
             }
             AppEvent::FileClose(e) => {
                 format!("close {}", &e.header.comm)
@@ -227,17 +183,9 @@ impl AppEvent {
                 let addr = e.endpoints.remote_ip.to_string(); // TODO: recheck this
 
                 format!("→ {addr}")
-            }
-            // AppEvent::Process(e) => {
-            //     format!("{} (ppid={})  {}", e.info.name, e.info.ppid, e.info.cmdline)
-            // }
-            AppEvent::Privilege(e) => {
-                let flag = if e.is_setuid { "setuid" } else { "setgid" };
-                format!("{flag} exec {}", e.binary)
-            }
-            AppEvent::Suspicious(e) => {
-                format!("[{}] {}", e.file, e.reason)
-            }
+            } // AppEvent::Process(e) => {
+              //     format!("{} (ppid={})  {}", e.info.name, e.info.ppid, e.info.cmdline)
+              // }
         }
     }
 }
