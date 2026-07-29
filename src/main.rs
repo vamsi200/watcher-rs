@@ -27,6 +27,7 @@ use tokio::{
     signal::ctrl_c,
     sync::{mpsc::Sender, watch},
 };
+use watcher_rs::app::UiEvent;
 use watcher_rs::*;
 use watcher_rs::{
     app::{App, writer_thread},
@@ -244,12 +245,14 @@ async fn main() -> color_eyre::Result<()> {
     initialize_logging()?;
 
     let mut stdout = stdout();
+
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture,)?;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<AppEvent>(1000);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AppEvent>(10000);
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-    let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<AppEvent>(1000);
+    let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<UiEvent>(10000);
+    let (batch_ready_tx, mut batch_ready_rx) = tokio::sync::mpsc::channel::<bool>(1000);
 
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -262,12 +265,13 @@ async fn main() -> color_eyre::Result<()> {
     });
 
     tokio::spawn(async move {
-        if let Err(e) = writer_thread(writer_rx).await {
+        if let Err(e) = writer_thread(writer_rx, batch_ready_tx).await {
             eprintln!("{e}");
         }
     });
 
-    app.run(terminal, rx, shutdown_tx, writer_tx).await?;
+    app.run(terminal, rx, shutdown_tx, writer_tx, batch_ready_rx)
+        .await?;
 
     restore();
     Ok(())

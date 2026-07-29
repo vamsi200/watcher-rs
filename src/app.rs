@@ -3,6 +3,11 @@ use crate::AppEvent;
 use crate::Severity;
 use crate::helper::format_timestamp_ns;
 use crate::ui::*;
+use crate::write::BatchInfo;
+use crate::write::PER_BATCH_SIZE;
+use crate::write::read_batch;
+use crate::write::read_batch_info;
+use crate::write::write_batch_info_to_disk;
 use crate::write::write_to_disk;
 use color_eyre::config::FilterCallback;
 use crossterm::event::ModifierKeyCode;
@@ -32,13 +37,19 @@ use tokio::sync::watch;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 
+#[derive(Debug, PartialEq)]
+pub enum ViewMode {
+    Live,
+    History,
+}
+
 const EVENT_BATCH_SIZE: usize = 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
 pub struct UiEvent {
     pub event: AppEvent,
     pub detail: String,
-    pub kind: &'static str,
+    pub kind: String,
     pub timestamp: String,
     pub severity: Severity,
 }
@@ -53,7 +64,7 @@ impl UiEvent {
         UiEvent {
             event: ev,
             detail,
-            kind,
+            kind: kind.to_string(),
             timestamp,
             severity,
         }
@@ -70,12 +81,7 @@ pub struct App {
     pub med_ev_count: usize,
     pub low_ev_count: usize,
     pub info_ev_count: usize,
-    pub horizontal_scroll_state: ScrollbarState,
-    pub horizontal_scroll: usize,
-    pub vertical_scroll_state: ScrollbarState,
-    pub vertical_scroll: usize,
     pub selected_tab: Focus,
-    pub selected: usize,
     pub selected_event: Option<UiEvent>,
     pub filtered_events: Vec<usize>,
     pub searching: bool,
@@ -86,13 +92,26 @@ pub struct App {
     pub event_name: String,
     pub g_char: bool,
     pub twle_hr_format: bool,
-    pub pid_conn_counts: HashMap<u32, (usize, u64)>,
-    pub pid_ports_seen: HashMap<u32, HashSet<u16>>,
     pub wallclock_offset_ns: u64,
     pub filter_state: ListState,
     pub stream_state: ListState,
     pub filter_area: Rect,
     pub stream_area: Rect,
+    pub view_mode: ViewMode,
+    pub view_port: Viewport,
+    pub current_batch: usize,
+    pub loaded_range: (usize, usize),
+    pub total_batches: usize,
+    pub follow_tail: bool,
+}
+
+#[derive(Debug)]
+pub struct Viewport {
+    /// Number of visible rows.
+    pub height: usize,
+
+    /// Global index of self.events[0]
+    pub window_start: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,14 +133,9 @@ impl Default for App {
             med_ev_count: 0,
             low_ev_count: 0,
             info_ev_count: 0,
-            horizontal_scroll_state: ScrollbarState::new(0),
-            horizontal_scroll: 0,
-            vertical_scroll_state: ScrollbarState::new(0),
-            vertical_scroll: 0,
             selected_tab: Focus::Stream,
             selected_event: None,
             filtered_events: Vec::with_capacity(10),
-            selected: 0,
             searching: false,
             search_query: String::new(),
             pause: false,
@@ -130,24 +144,40 @@ impl Default for App {
             event_name: String::new(),
             g_char: false,
             twle_hr_format: false,
-            pid_conn_counts: HashMap::new(),
-            pid_ports_seen: HashMap::new(),
             wallclock_offset_ns: 0,
             filter_state: ListState::default(),
             filter_area: Rect::default(),
             stream_area: Rect::default(),
             stream_state: ListState::default(),
+            view_mode: ViewMode::Live,
+            current_batch: 0,
+            view_port: Viewport {
+                height: 0,
+                window_start: 0,
+            },
+            loaded_range: (0, 0),
+            total_batches: 0,
+            follow_tail: false,
         }
     }
 }
 
-pub async fn writer_thread(mut receiver: Receiver<AppEvent>) -> anyhow::Result<()> {
-    let mut batch = Vec::with_capacity(1024);
+pub async fn writer_thread(
+    mut receiver: Receiver<UiEvent>,
+    batch_tx: Sender<bool>,
+) -> anyhow::Result<()> {
+    let mut batch = Vec::with_capacity(PER_BATCH_SIZE);
+    let mut batch_info = BatchInfo::default();
+    let mut count = 0;
     while let Some(event) = receiver.recv().await {
         batch.push(event);
-
-        if batch.len() >= 1024 {
-            write_to_disk(&batch)?;
+        if batch.len() >= PER_BATCH_SIZE {
+            let start_offset = write_to_disk(&batch).await?;
+            count += 1;
+            batch_info.file_offset = start_offset;
+            batch_info.count = count;
+            write_batch_info_to_disk(batch_info)?;
+            batch_tx.send(true).await?;
             batch.clear();
         }
     }
@@ -205,21 +235,65 @@ impl App {
         Self::default()
     }
 
-    pub fn push(&mut self, ev: AppEvent) {
+    fn batch_count(&self) -> anyhow::Result<usize> {
+        Ok(read_batch_info()?.len())
+    }
+
+    fn ensure_batches_loaded(&mut self, global_selected: usize) -> anyhow::Result<()> {
+        if self.total_batches == 0 {
+            return Ok(());
+        }
+
+        let last_batch = self.total_batches.saturating_sub(1);
+        let batch = (global_selected / PER_BATCH_SIZE).min(last_batch);
+        let (lo, hi) = self.loaded_range;
+
+        if batch >= lo && batch <= hi {
+            return Ok(());
+        }
+
+        let (new_lo, new_hi) = if batch < lo {
+            (batch.saturating_sub(1), batch)
+        } else {
+            (batch, (batch + 1).min(last_batch))
+        };
+
+        self.load_batch_range(new_lo, new_hi)
+    }
+
+    fn load_batch_range(&mut self, lo: usize, hi: usize) -> anyhow::Result<()> {
+        self.events.clear();
+        self.filtered_events.clear();
+
+        for b in lo..=hi {
+            let batch_events = read_batch(b)?;
+            for ev in batch_events {
+                let idx = self.events.len();
+                self.events.push(ev);
+                if self.search_query.is_empty()
+                    || match_query(&self.events[idx], &self.search_query)
+                {
+                    self.filtered_events.push(idx);
+                }
+            }
+        }
+
+        self.loaded_range = (lo, hi);
+        self.view_port.window_start = lo * PER_BATCH_SIZE;
+        Ok(())
+    }
+
+    pub async fn push(
+        &mut self,
+        ev: AppEvent,
+        mut writer_tx: Sender<UiEvent>,
+    ) -> anyhow::Result<()> {
         if self.event_name.is_empty() {
             self.event_name.push_str("All");
         }
 
         if !ev.matches_filter(&self.event_name) {
-            return;
-        }
-
-        match ev.severity() {
-            Severity::Critical => self.crit_ev_count += 1,
-            Severity::High => self.high_ev_count += 1,
-            Severity::Medium => self.med_ev_count += 1,
-            Severity::Low => self.low_ev_count += 1,
-            Severity::Info => self.info_ev_count += 1,
+            return Ok(());
         }
 
         let ev = UiEvent::new(ev, self.twle_hr_format, self.wallclock_offset_ns);
@@ -229,18 +303,47 @@ impl App {
             .selected()
             .is_none_or(|i| ev.severity == SEVERITY_FILTERS[i].0)
         {
-            let idx = self.events.len();
-            self.events.push(ev);
-
-            if self.search_query.is_empty() || match_query(&self.events[idx], &self.search_query) {
-                self.filtered_events.push(idx);
+            match ev.event.severity() {
+                Severity::Critical => self.crit_ev_count += 1,
+                Severity::High => self.high_ev_count += 1,
+                Severity::Medium => self.med_ev_count += 1,
+                Severity::Low => self.low_ev_count += 1,
+                Severity::Info => self.info_ev_count += 1,
             }
+
+            match self.view_mode {
+                ViewMode::Live => {
+                    let idx = self.events.len();
+
+                    self.events.push(ev.clone());
+
+                    writer_tx.send(ev).await?;
+
+                    if self.search_query.is_empty()
+                        || match_query(&self.events[idx], &self.search_query)
+                    {
+                        self.filtered_events.push(idx);
+                    }
+                }
+
+                ViewMode::History => {
+                    writer_tx.send(ev).await?;
+                }
+            }
+
             if self.filtered_events.is_empty() {
-                self.selected = 0;
+                self.stream_state.select(Some(0));
             } else {
-                self.selected = self.selected.min(self.filtered_events.len() - 1);
+                self.stream_state.select(Some(
+                    self.stream_state
+                        .selected()
+                        .unwrap_or(0)
+                        .min(self.filtered_events.len() - 1),
+                ));
             }
         }
+
+        Ok(())
     }
 
     pub fn search_events(&mut self) {
@@ -252,9 +355,12 @@ impl App {
             }
         }
 
-        self.selected = self
-            .selected
-            .min(self.filtered_events.len().saturating_sub(1));
+        self.stream_state.select(Some(
+            self.stream_state
+                .selected()
+                .unwrap_or(0)
+                .min(self.filtered_events.len().saturating_sub(1)),
+        ));
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -280,20 +386,11 @@ impl App {
             }
 
             MouseEventKind::ScrollDown => {
-                let next = self
-                    .stream_state
-                    .selected()
-                    .unwrap_or(0)
-                    .saturating_add(1)
-                    .min(self.filtered_events.len() - 1);
-
-                self.stream_state.select(Some(next));
+                self.scroll_down();
             }
 
             MouseEventKind::ScrollUp => {
-                let next = self.stream_state.selected().unwrap_or(0).saturating_sub(1);
-
-                self.stream_state.select(Some(next));
+                self.scroll_up();
             }
 
             _ => {}
@@ -378,16 +475,45 @@ impl App {
             }
             KeyCode::Char('g') => {
                 if self.g_char {
-                    self.stream_state.select(Some(0));
                     self.g_char = false;
+
+                    if self.view_mode == ViewMode::History {
+                        if let Err(e) = self.ensure_batches_loaded(0) {
+                            tracing::error!("failed to load batch: {e}");
+                            return;
+                        }
+                    }
+                    self.view_port.window_start = self.loaded_range.0 * PER_BATCH_SIZE;
+                    self.stream_state.select(Some(0));
+                    self.get_selected();
                 } else {
                     self.g_char = true;
                 }
             }
+
             KeyCode::Char('G') => {
+                if self.total_batches == 0 {
+                    return;
+                }
+
+                if !self.pause {
+                    self.follow_tail = true;
+                }
+
+                let last_global = self.total_batches * PER_BATCH_SIZE - 1;
+
+                if self.view_mode == ViewMode::History {
+                    if let Err(e) = self.ensure_batches_loaded(last_global) {
+                        tracing::error!("failed to load batch: {e}");
+                        return;
+                    }
+                }
+
                 if !self.filtered_events.is_empty() {
+                    self.view_port.window_start = self.loaded_range.0 * PER_BATCH_SIZE;
                     self.stream_state
                         .select(Some(self.filtered_events.len() - 1));
+                    self.get_selected();
                 }
             }
             KeyCode::Char('q') => self.running = false,
@@ -409,22 +535,17 @@ impl App {
         }
     }
 
-    // pub fn handle_ev_key(&mut self, key: KeyEvent) {
-    //     match key.code {
-    //         _ => {}
-    //     }
-    // }
-
     pub async fn run(
         mut self,
         mut terminal: DefaultTerminal,
         mut rx: Receiver<AppEvent>,
         mut sh_tx: watch::Sender<bool>,
-        mut writer_tx: Sender<AppEvent>,
+        mut writer_tx: Sender<UiEvent>,
+        mut batch_rx: Receiver<bool>,
     ) -> color_eyre::Result<()> {
         let mut last_tick = std::time::Instant::now();
         let tick_rate = Duration::from_millis(50);
-
+        let mut changed = false;
         let realtime_ns = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_nanos() as u64;
@@ -437,9 +558,12 @@ impl App {
         while self.running {
             while let Ok(event) = rx.try_recv() {
                 if !self.pause {
-                    writer_tx.send(event.clone()).await?;
-                    self.push(event);
+                    self.push(event, writer_tx.clone()).await;
                 }
+            }
+
+            while let Ok(_) = batch_rx.try_recv() {
+                self.total_batches = read_batch_info().unwrap().len();
             }
 
             if last_tick.elapsed() >= tick_rate {
@@ -461,6 +585,7 @@ impl App {
                 }
             }
         }
+
         if !self.running {
             execute!(
                 terminal.backend_mut(),
@@ -469,34 +594,57 @@ impl App {
             )?;
             sh_tx.send(true);
         }
+
         Ok(())
     }
 
     pub fn scroll_up(&mut self) {
-        let next = self.stream_state.selected().unwrap_or(0).saturating_sub(1);
+        let local = self.stream_state.selected().unwrap_or(0);
+        let global = self.view_port.window_start + local;
+        let next_global = global.saturating_sub(1);
 
-        self.stream_state.select(Some(next));
+        if self.view_mode == ViewMode::History {
+            if let Err(e) = self.ensure_batches_loaded(next_global) {
+                tracing::error!("failed to load batch: {e}");
+                return;
+            }
+        }
+
+        let next_local = next_global.saturating_sub(self.view_port.window_start);
+        self.stream_state.select(Some(next_local));
         self.get_selected();
     }
 
     pub fn scroll_down(&mut self) {
-        let len = self.filtered_events.len();
+        let local = self.stream_state.selected().unwrap_or(0);
+        let global = self.view_port.window_start + local;
+        let next_global = global + 1;
 
-        if len == 0 {
-            self.stream_state.select(None);
-            self.selected_event = None;
-            return;
+        if self.view_mode == ViewMode::History {
+            if let Err(e) = self.ensure_batches_loaded(next_global) {
+                tracing::error!("failed to load batch: {e}");
+                return;
+            }
         }
 
-        let next = self
-            .stream_state
-            .selected()
-            .unwrap_or(0)
-            .saturating_add(1)
-            .min(len - 1);
-
-        self.stream_state.select(Some(next));
+        let next_local = next_global
+            .saturating_sub(self.view_port.window_start)
+            .min(self.filtered_events.len().saturating_sub(1));
+        self.stream_state.select(Some(next_local));
         self.get_selected();
+    }
+
+    pub fn get_selected(&mut self) {
+        let Some(selected) = self.stream_state.selected() else {
+            self.selected_event = None;
+            return;
+        };
+
+        if let Some(&idx) = self.filtered_events.get(selected) {
+            self.selected_event = self.events.get(idx).cloned();
+        } else {
+            self.selected_event = None;
+        }
     }
 
     pub fn search_push(&mut self, c: char) {
@@ -518,24 +666,11 @@ impl App {
             .get(self.stream_state.selected().unwrap_or(0))
             .and_then(|&idx| self.events.get(idx))
     }
-
-    pub fn get_selected(&mut self) {
-        let Some(selected) = self.stream_state.selected() else {
-            self.selected_event = None;
-            return;
-        };
-
-        if let Some(&idx) = self.filtered_events.get(selected) {
-            self.selected_event = self.events.get(idx).cloned();
-        } else {
-            self.selected_event = None;
-        }
-    }
 }
 
 pub fn match_query(e: &UiEvent, st: &str) -> bool {
     let detail = &e.detail;
-    let kind = e.kind;
+    let kind = &e.kind;
     if st.bytes().all(|b| b.is_ascii_digit()) {
         if e.event.pid().to_string().contains(st) {
             return true;

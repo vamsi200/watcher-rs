@@ -1,5 +1,6 @@
 #![allow(unused)]
-use crate::app::{App, FILTEREVENTS, Focus, UiEvent};
+use crate::app::{App, FILTEREVENTS, Focus, UiEvent, ViewMode};
+use crate::write::{BatchInfo, PER_BATCH_SIZE};
 use crate::*;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
@@ -115,6 +116,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     app.stream_area = inner;
+
     let bg = if app.selected_tab == crate::app::Focus::Stream {
         C_BLUE
     } else {
@@ -137,14 +139,16 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         header_area,
     );
 
-    // if height == 0 {
-    //     return;
-    // }
-    //
     let total = app.filtered_events.len();
 
     if total == 0 {
         return;
+    }
+
+    if app.view_mode == ViewMode::Live && app.filtered_events.len() >= PER_BATCH_SIZE {
+        app.view_mode = ViewMode::History;
+        app.current_batch = 0;
+        app.view_port.window_start = app.filter_state.selected().unwrap_or(0);
     }
 
     let selected = app.stream_state.selected().unwrap_or(0);
@@ -158,7 +162,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         let sev_col = sev_color(&sev);
         let ts = &event.timestamp;
         let pid = event.event.pid();
-        let kind = event.kind;
+        let kind = &event.kind;
         let detail = &event.detail;
         let border_char = if is_sel { "▶" } else { " " };
         let bg = if is_sel { C_BG3 } else { C_BG };
@@ -194,8 +198,6 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let list = List::new(items).style(Style::default().bg(C_BG));
     frame.render_stateful_widget(list, list_area, &mut app.stream_state);
-
-    let total = app.filtered_events.len();
 
     render_scrollbar(frame, inner, selected, total);
 }

@@ -1,7 +1,7 @@
 #![allow(unused)]
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     thread::panicking,
 };
 
@@ -13,17 +13,36 @@ use rkyv::{
     rancor::{Error, Strategy},
     to_bytes,
 };
+use tokio::sync::mpsc::Sender;
 
+use crate::{AppEvent, PrivilegeEvent, ProcessEvent, SuspiciousEvent, app::UiEvent};
 use bpfx::file::*;
 use bpfx::network::*;
 use bpfx::process::*;
 
-use crate::{AppEvent, PrivilegeEvent, ProcessEvent, SuspiciousEvent};
+pub const PER_BATCH_SIZE: usize = 200;
 
-pub fn write_to_disk(event: &Vec<AppEvent>) -> anyhow::Result<(), anyhow::Error> {
-    let mut file = OpenOptions::new().append(true).open("./log")?;
+#[derive(Debug, Clone, Copy, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub struct BatchInfo {
+    pub file_offset: u64,
+    pub count: usize,
+}
 
-    let bytes = to_bytes::<Error>(event)?;
+impl Default for BatchInfo {
+    fn default() -> Self {
+        Self {
+            file_offset: 0,
+            count: PER_BATCH_SIZE,
+        }
+    }
+}
+
+pub fn write_batch_info_to_disk(info: BatchInfo) -> anyhow::Result<(), anyhow::Error> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("./info")?;
+    let bytes = to_bytes::<Error>(&info)?;
 
     file.write_all(&(bytes.len() as u32).to_le_bytes())?;
     file.write_all(&bytes)?;
@@ -31,21 +50,72 @@ pub fn write_to_disk(event: &Vec<AppEvent>) -> anyhow::Result<(), anyhow::Error>
     Ok(())
 }
 
-pub fn read_from_log(ev: &[AppEvent]) -> anyhow::Result<Vec<AppEvent>, anyhow::Error> {
-    let mut events = Vec::new();
-    let mut file = File::open("./log")?;
+pub fn read_batch_info() -> anyhow::Result<Vec<BatchInfo>, anyhow::Error> {
+    tracing::info!("called read_batch_info");
+    let mut info = Vec::new();
+    let mut file = File::open("./info")?;
+
     loop {
         let mut len = [0u8; 4];
         if file.read_exact(&mut len).is_err() {
             break;
         }
+
         let len = u32::from_le_bytes(len) as usize;
         let mut content = vec![0; len];
-        file.read_exact(&mut content)?;
+        file.read_exact(&mut content);
 
-        let event = rkyv::from_bytes::<Vec<AppEvent>, Error>(&content)?;
-        events.extend(event);
+        let event = rkyv::from_bytes::<BatchInfo, Error>(&content)?;
+        info.push(event);
     }
+
+    Ok(info)
+}
+
+pub fn read_batch(batch: usize) -> anyhow::Result<Vec<UiEvent>> {
+    tracing::info!("reading from disk..");
+    let batch_info = read_batch_info()?;
+    let mut file = File::open("./log")?;
+
+    let info = &batch_info[batch];
+
+    file.seek(std::io::SeekFrom::Start(info.file_offset))?;
+
+    let mut len = [0u8; 4];
+    file.read_exact(&mut len)?;
+
+    let len = u32::from_le_bytes(len) as usize;
+
+    let mut content = vec![0; len];
+    file.read_exact(&mut content)?;
+    let output = rkyv::from_bytes::<Vec<UiEvent>, Error>(&content)?;
+    tracing::info!("returned batch len: {}", output.len());
+    Ok(output)
+}
+
+pub async fn write_to_disk(event: &Vec<UiEvent>) -> anyhow::Result<u64> {
+    let mut file = OpenOptions::new().create(true).append(true).open("./log")?;
+    let start_offset = file.metadata()?.len();
+    let bytes = to_bytes::<Error>(event)?;
+    file.write_all(&(bytes.len() as u32).to_le_bytes())?;
+    file.write_all(&bytes)?;
+    Ok(start_offset)
+}
+
+pub fn read_from_log(file_offset: u64) -> anyhow::Result<Vec<UiEvent>, anyhow::Error> {
+    let mut events = Vec::new();
+    let mut file = File::open("./log")?;
+
+    file.seek(std::io::SeekFrom::Start(file_offset))?;
+
+    let mut len = [0u8; 4];
+    file.read_exact(&mut len)?;
+    let len = u32::from_le_bytes(len) as usize;
+    let mut content = vec![0; len];
+    file.read_exact(&mut content)?;
+
+    let event = rkyv::from_bytes::<Vec<UiEvent>, Error>(&content)?;
+    events.extend(event);
 
     Ok(events)
 }
@@ -85,6 +155,9 @@ fn test_write() {
 
     // write_to_disk(&events).unwrap();
     // write_to_disk(ev2).unwrap();
-    panic!("{:#?}", read_from_log(&events).unwrap().len());
+    // panic!("{:#?}", read_from_log().unwrap().len());
+
+    panic!("{:?}", read_batch_info().unwrap());
+
     // assert_eq!(true, read_from_log(&ev).is_ok());
 }
