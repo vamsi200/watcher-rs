@@ -1,10 +1,12 @@
 #![allow(unused)]
+use std::process::id;
+
 use crate::app::{App, FILTEREVENTS, Focus, UiEvent, ViewMode};
 use crate::write::{BatchInfo, PER_BATCH_SIZE};
 use crate::*;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
@@ -65,10 +67,6 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
     render_side_bar(frame, app, chunks[0]);
     render_stream(frame, app, chunks[1]);
     render_detail_side_bar(frame, app, chunks[2]);
-
-    if app.filter_mode && !app.searching {
-        render_filter_popup(frame, app);
-    }
 }
 
 const TIME_W: usize = 15;
@@ -148,7 +146,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.view_mode == ViewMode::Live && app.filtered_events.len() >= PER_BATCH_SIZE {
         app.view_mode = ViewMode::History;
         app.current_batch = 0;
-        app.view_port.window_start = app.filter_state.selected().unwrap_or(0);
+        app.view_port.window_start = app.sev_state.selected().unwrap_or(0);
     }
 
     let selected = app.stream_state.selected().unwrap_or(0);
@@ -242,21 +240,37 @@ pub const SEVERITY_FILTERS: &[(Severity, &str); 5] = &[
 ];
 
 fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
-    let bg = if app.selected_tab == crate::app::Focus::Sidebar {
+    let border = if app.selected_tab == crate::app::Focus::Sidebar {
         C_BLUE
     } else {
         C_BG2
     };
 
-    let block = Block::default()
+    let outer = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(bg))
+        .border_style(Style::default().fg(border))
         .style(Style::default().bg(C_BG));
 
-    let inner = block.inner(area);
-    app.filter_area = inner;
-    frame.render_widget(block, area);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    let [severity_area, filter_area] = Layout::vertical([
+        Constraint::Length((SEVERITY_FILTERS.len() + 3) as u16),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+
+    let severity_block = Block::default().title(" Severity ");
+
+    let severity_inner = severity_block.inner(severity_area);
+    frame.render_widget(severity_block, severity_area);
+
+    let rows = Layout::vertical(
+        std::iter::repeat(Constraint::Length(1))
+            .take(SEVERITY_FILTERS.len())
+            .collect::<Vec<_>>(),
+    )
+    .split(severity_inner);
 
     let sev_colors = [C_BG3, C_RED, C_ORANGE, C_YELLOW, C_BLUE];
     let counts = [
@@ -267,39 +281,26 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         app.low_ev_count,
     ];
 
-    let rows = Layout::vertical(
-        std::iter::repeat(Constraint::Length(1))
-            .take(SEVERITY_FILTERS.len() + 1)
-            .collect::<Vec<_>>(),
-    )
-    .split(inner);
-
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            "SEVERITY",
-            Style::default().fg(C_MUTED).add_modifier(Modifier::BOLD),
-        )),
-        rows[0],
-    );
-
-    let selected = app.filter_state.selected();
+    let selected = app.sev_state.selected();
+    app.sev_area = severity_area;
 
     for (i, (_, label)) in SEVERITY_FILTERS.iter().enumerate() {
         let [left, right] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(4)]).areas(rows[i + 1]);
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(4)]).areas(rows[i]);
 
         let is_selected = selected == Some(i);
 
         let marker = if is_selected { "▶" } else { "▸" };
 
-        let marker_style = if is_selected {
-            Style::default().fg(C_BLUE).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(C_MUTED)
-        };
-
         let left_line = Line::from(vec![
-            Span::styled(marker, marker_style),
+            Span::styled(
+                marker,
+                if is_selected {
+                    Style::default().fg(C_BLUE).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(C_MUTED)
+                },
+            ),
             Span::raw(" "),
             Span::styled("■ ", Style::default().fg(sev_colors[i])),
             Span::styled(
@@ -315,12 +316,50 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(Paragraph::new(left_line), left);
 
         frame.render_widget(
-            Paragraph::new(format!("{:>4}", counts[i]))
-                .alignment(Alignment::Left)
-                .style(Style::default().fg(C_MUTED)),
+            Paragraph::new(format!("{:>4}", counts[i])).style(Style::default().fg(C_MUTED)),
             right,
         );
     }
+
+    let filter_block = Block::default().title(" Filter Events ");
+
+    let filter_inner = filter_block.inner(filter_area);
+    frame.render_widget(filter_block, filter_area);
+    app.filter_area = filter_area;
+
+    let selected = app.filter_state.selected();
+
+    let items: Vec<ListItem> = FILTEREVENTS
+        .iter()
+        .enumerate()
+        .map(|(idx, event)| {
+            let selected = Some(idx) == selected;
+
+            let marker = if selected { "▶" } else { "▸" };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    marker,
+                    if selected {
+                        Style::default().fg(C_BLUE).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(C_MUTED)
+                    },
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    *event,
+                    Style::default().fg(C_TEXT).add_modifier(if selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+                ),
+            ]))
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), filter_inner);
 }
 
 fn render_detail_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -480,8 +519,8 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
         }
         AppEvent::FileClose(e) => {
             section(&mut lines, "FILE");
-            kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
-            kv(&mut lines, "path", &e.header.comm, C_PATH);
+            kv(&mut lines, "pid", &e.event.header.pid.to_string(), C_TEXT);
+            kv(&mut lines, "path", &e.event.header.comm, C_PATH);
         }
         AppEvent::Network(e) => {
             let addr = e.endpoints.remote_ip.to_string();
@@ -601,43 +640,4 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Paragraph::new(spans).style(Style::default().bg(C_BG2)),
         area,
     );
-}
-
-fn render_filter_popup(frame: &mut Frame, app: &mut App) {
-    let area = frame.area();
-    let popup_area = {
-        let vertical =
-            Layout::vertical([Constraint::Percentage(50)]).flex(ratatui::layout::Flex::Center);
-        let horizontal =
-            Layout::horizontal([Constraint::Percentage(50)]).flex(ratatui::layout::Flex::Center);
-        let [area] = vertical.areas(area);
-        let [area] = horizontal.areas(area);
-        area
-    };
-    frame.render_widget(Clear, popup_area);
-
-    let block = Block::default()
-        .title(" Filter Events ")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan));
-
-    let items: Vec<ListItem> = FILTEREVENTS
-        .iter()
-        .enumerate()
-        .map(|(idx, event)| {
-            let prefix = if idx == app.event_idx { "> " } else { "  " };
-
-            ListItem::new(Line::from(format!("{prefix}{event}")))
-        })
-        .collect();
-
-    let list = List::new(items).block(block).highlight_style(
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    );
-
-    frame.render_widget(list, popup_area);
 }

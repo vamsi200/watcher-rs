@@ -2,6 +2,7 @@
 use crate::helper::{bytes_to_str, check_path, is_root_only_path, parse_addr};
 use crate::*;
 use crate::{PrivilegeEvent, Severity, helper::is_sensitive_path};
+use bpfx::EventHeader;
 use bpfx::{FileEvent, process::ProcessStartEvent};
 use futures::lock::Mutex;
 use libc::O_TRUNC;
@@ -243,41 +244,71 @@ const SUSPICIOUS_INPUT_FLAGS: &[(i32, &str)] = &[
 const HIGH_READ_THRESHOLD: usize = 200;
 const MED_READ_THRESHOLD: usize = 80;
 
-pub struct RuleContext {
-    pub process_cache: HashMap<u32, ProcessInfo>,
+pub struct RuleContext<'a> {
+    pub process_cache: &'a HashMap<u32, ProcessInfo>,
 }
 
 #[derive(
     Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
-pub struct ClassifiedFileEvent {
-    pub event: FileOpenEvent,
+pub struct Classified<T> {
+    pub event: T,
     pub severity: Severity,
     pub matched_rules: Vec<String>,
 }
 
+type ClassifiedFileOpenEvent = Classified<FileOpenEvent>;
+type ClassifiedFileCloseEvent = Classified<FileCloseEvent>;
+
 pub trait FileRule: Send + Sync {
     fn name(&self) -> &'static str;
-    fn check(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity>;
+    fn check_open(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity>;
+    fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity>;
 }
 
 pub struct RuleEngine {
-    rules: Vec<Box<dyn FileRule>>,
+    pub rules: Vec<Box<dyn FileRule>>,
 }
 
 impl RuleEngine {
-    pub fn classify(&self, event: FileOpenEvent, ctx: RuleContext) -> ClassifiedFileEvent {
+    pub fn classify_open(
+        &self,
+        event: FileOpenEvent,
+        ctx: RuleContext,
+    ) -> Classified<FileOpenEvent> {
         let mut severity = Severity::Low;
         let mut matched = Vec::new();
 
         for rule in &self.rules {
-            if let Some(sev) = rule.check(&event, &ctx) {
+            if let Some(sev) = rule.check_open(&event, &ctx) {
                 severity = severity.max(sev);
                 matched.push(rule.name().to_owned());
             }
         }
 
-        ClassifiedFileEvent {
+        Classified {
+            event,
+            severity,
+            matched_rules: matched,
+        }
+    }
+
+    pub fn classify_close(
+        &self,
+        event: FileCloseEvent,
+        ctx: RuleContext,
+    ) -> Classified<FileCloseEvent> {
+        let mut severity = Severity::Low;
+        let mut matched = Vec::new();
+
+        for rule in &self.rules {
+            if let Some(sev) = rule.check_close(&event, &ctx) {
+                severity = severity.max(sev);
+                matched.push(rule.name().to_owned());
+            }
+        }
+
+        Classified {
             event,
             severity,
             matched_rules: matched,
@@ -285,21 +316,96 @@ impl RuleEngine {
     }
 }
 
-pub struct SensitivePathRule;
+trait FileEventCommon {
+    fn header(&self) -> &EventHeader;
+    fn file_path(&self) -> &str;
+    fn file_type(&self) -> &FileType;
+    fn inode(&self) -> u64;
+    fn retval(&self) -> i32;
+    fn flags(&self) -> u32;
+    fn flags_str(&self) -> String;
+    fn is_write(&self) -> bool;
+}
 
-impl FileRule for SensitivePathRule {
-    fn name(&self) -> &'static str {
-        "SensitivePath"
+impl FileEventCommon for FileOpenEvent {
+    fn header(&self) -> &EventHeader {
+        &self.header
     }
 
-    fn check(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity> {
+    fn file_path(&self) -> &str {
+        &self.file_path
+    }
+
+    fn file_type(&self) -> &FileType {
+        &self.file_type
+    }
+
+    fn inode(&self) -> u64 {
+        self.inode
+    }
+
+    fn retval(&self) -> i32 {
+        self.retval
+    }
+
+    fn flags(&self) -> u32 {
+        self.flags
+    }
+
+    fn flags_str(&self) -> String {
+        self.flags()
+    }
+
+    fn is_write(&self) -> bool {
+        self.is_write()
+    }
+}
+
+impl FileEventCommon for FileCloseEvent {
+    fn header(&self) -> &EventHeader {
+        &self.header
+    }
+
+    fn file_path(&self) -> &str {
+        &self.file_path
+    }
+
+    fn file_type(&self) -> &FileType {
+        &self.file_type
+    }
+
+    fn inode(&self) -> u64 {
+        self.inode
+    }
+
+    fn retval(&self) -> i32 {
+        self.retval
+    }
+
+    fn flags(&self) -> u32 {
+        self.flags
+    }
+
+    fn flags_str(&self) -> String {
+        self.flags()
+    }
+
+    fn is_write(&self) -> bool {
+        self.is_write()
+    }
+}
+
+pub struct SensitivePathRule;
+
+impl SensitivePathRule {
+    fn check<T>(&self, event: &T, ctx: &RuleContext) -> Option<Severity>
+    where
+        T: FileEventCommon,
+    {
         PATH_SEVERITY
             .iter()
             .filter_map(|(name, sev)| {
-                if event.file_path.starts_with(name) {
-                    // if event.file_path == "/etc/passwd" {
-                    // tracing::debug!("{}", format!("{}: {:?}", event.file_path, sev));
-                    // }
+                if event.file_path().starts_with(name) {
                     Some(sev)
                 } else {
                     None
@@ -310,15 +416,28 @@ impl FileRule for SensitivePathRule {
     }
 }
 
-pub struct FlagRule;
-
-impl FileRule for FlagRule {
+impl FileRule for SensitivePathRule {
     fn name(&self) -> &'static str {
-        "SensitiveFlag"
+        "SensitivePath"
     }
 
-    fn check(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity> {
-        match event.flags().as_str() {
+    fn check_open(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity> {
+        self.check(event, ctx)
+    }
+
+    fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
+        self.check(event, ctx)
+    }
+}
+
+pub struct FlagRule;
+
+impl FlagRule {
+    fn check<T>(&self, event: &T, ctx: &RuleContext) -> Option<Severity>
+    where
+        T: FileEventCommon,
+    {
+        match event.flags_str().as_str() {
             "RDONLY" => Some(Severity::Low),
             "WRONLY" => Some(Severity::Medium),
             "RDWR" => Some(Severity::Medium),
@@ -329,15 +448,28 @@ impl FileRule for FlagRule {
     }
 }
 
-pub struct RootWriteRule;
-
-impl FileRule for RootWriteRule {
+impl FileRule for FlagRule {
     fn name(&self) -> &'static str {
-        "RootWrite"
+        "SensitiveFlag"
     }
 
-    fn check(&self, event: &FileOpenEvent, _: &RuleContext) -> Option<Severity> {
-        if event.header.uid == 0 && event.is_write() {
+    fn check_open(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity> {
+        self.check(event, ctx)
+    }
+
+    fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
+        self.check(event, ctx)
+    }
+}
+
+pub struct RootWriteRule;
+
+impl RootWriteRule {
+    fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
+    where
+        T: FileEventCommon,
+    {
+        if event.header().uid == 0 && event.is_write() {
             Some(Severity::High)
         } else {
             None
@@ -345,15 +477,28 @@ impl FileRule for RootWriteRule {
     }
 }
 
-pub struct TempExecutableRule;
-
-impl FileRule for TempExecutableRule {
+impl FileRule for RootWriteRule {
     fn name(&self) -> &'static str {
-        "TempExecutable"
+        "RootWrite"
     }
 
-    fn check(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity> {
-        let Some(proc) = ctx.process_cache.get(&event.header.pid) else {
+    fn check_open(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity> {
+        self.check(event, ctx)
+    }
+
+    fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
+        self.check(event, ctx)
+    }
+}
+
+pub struct TempExecutableRule;
+
+impl TempExecutableRule {
+    fn check<T>(&self, event: &T, ctx: &RuleContext) -> Option<Severity>
+    where
+        T: FileEventCommon,
+    {
+        let Some(proc) = ctx.process_cache.get(&event.header().pid) else {
             return None;
         };
 
@@ -365,22 +510,55 @@ impl FileRule for TempExecutableRule {
     }
 }
 
-pub fn classify_file_events(event: FileOpenEvent) -> ClassifiedFileEvent {
-    let process_map: HashMap<u32, ProcessInfo> = HashMap::new(); //TODO
-    let engine = RuleEngine {
-        rules: vec![
-            Box::new(TempExecutableRule),
-            Box::new(RootWriteRule),
-            Box::new(SensitivePathRule),
-            Box::new(FlagRule),
-        ],
-    };
+impl FileRule for TempExecutableRule {
+    fn name(&self) -> &'static str {
+        "TempExecutable"
+    }
 
-    let rule_ctx = RuleContext {
-        process_cache: process_map,
-    };
+    fn check_open(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity> {
+        self.check(event, ctx)
+    }
 
-    engine.classify(event, rule_ctx)
+    fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
+        self.check(event, ctx)
+    }
+}
+
+pub struct FileClassifier {
+    pub process_map: HashMap<u32, ProcessInfo>,
+    pub engine: RuleEngine,
+}
+
+impl FileClassifier {
+    pub fn new() -> Self {
+        Self {
+            process_map: HashMap::new(),
+            engine: RuleEngine {
+                rules: vec![
+                    Box::new(TempExecutableRule),
+                    Box::new(RootWriteRule),
+                    Box::new(SensitivePathRule),
+                    Box::new(FlagRule),
+                ],
+            },
+        }
+    }
+
+    pub fn classify_open(&self, event: FileOpenEvent) -> Classified<FileOpenEvent> {
+        let ctx = RuleContext {
+            process_cache: &self.process_map,
+        };
+
+        self.engine.classify_open(event, ctx)
+    }
+
+    pub fn classify_close(&self, event: FileCloseEvent) -> Classified<FileCloseEvent> {
+        let ctx = RuleContext {
+            process_cache: &self.process_map,
+        };
+
+        self.engine.classify_close(event, ctx)
+    }
 }
 
 // TODO: Test and refine the approach and reduce allocations

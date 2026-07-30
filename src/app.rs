@@ -17,6 +17,7 @@ use crossterm::event::MouseEventKind;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::LeaveAlternateScreen;
 use futures::SinkExt;
+use libc::READ_IMPLIES_EXEC;
 use libc::setspent;
 use nix::time::ClockId;
 use nix::time::clock_gettime;
@@ -96,8 +97,10 @@ pub struct App {
     pub g_char: bool,
     pub twle_hr_format: bool,
     pub wallclock_offset_ns: u64,
-    pub filter_state: ListState,
+    pub sev_state: ListState,
     pub stream_state: ListState,
+    pub filter_state: ListState,
+    pub sev_area: Rect,
     pub filter_area: Rect,
     pub stream_area: Rect,
     pub view_mode: ViewMode,
@@ -148,6 +151,7 @@ impl Default for App {
             g_char: false,
             twle_hr_format: false,
             wallclock_offset_ns: 0,
+            sev_state: ListState::default(),
             filter_state: ListState::default(),
             filter_area: Rect::default(),
             stream_area: Rect::default(),
@@ -161,6 +165,7 @@ impl Default for App {
             loaded_range: (0, 0),
             total_batches: 0,
             follow_tail: false,
+            sev_area: Rect::default(),
         }
     }
 }
@@ -187,7 +192,7 @@ pub async fn writer_thread(
     Ok(())
 }
 
-fn row_at(area: Rect, col: u16, row: u16) -> Option<usize> {
+fn row_at(area: Rect, col: u16, row: u16, len: usize) -> Option<usize> {
     if !area.contains(Position::new(col, row)) {
         return None;
     }
@@ -200,7 +205,7 @@ fn row_at(area: Rect, col: u16, row: u16) -> Option<usize> {
 
     let idx = (rel - 1) as usize;
 
-    (idx < SEVERITY_FILTERS.len()).then_some(idx)
+    (idx < len).then_some(idx)
 }
 
 fn row_at_stream(app: &App, col: u16, row: u16) -> Option<usize> {
@@ -220,17 +225,16 @@ fn row_at_stream(app: &App, col: u16, row: u16) -> Option<usize> {
     (idx < app.filtered_events.len()).then_some(idx)
 }
 
-pub const FILTEREVENTS: [&str; 10] = [
+pub const FILTEREVENTS: [&str; 9] = [
     "All",
-    "ExecEvent",
+    "ExecStart",
     "ExecExit",
-    "ExecExitEvent",
-    "FileEvent",
-    "FileCloseEvent",
-    "NetworkEvent",
-    "ProcessEvent",
-    "PrivilegeEvent",
-    "SuspiciousEvent",
+    "FileOpen",
+    "FileClose",
+    "Network",
+    "Process",
+    "Privilege",
+    "Suspicious",
 ];
 
 impl App {
@@ -287,14 +291,14 @@ impl App {
             self.event_name.push_str("All");
         }
 
-        if !ev.matches_filter(&self.event_name) {
+        if !ev.matches_filter(self.filter_state.selected().unwrap_or(0)) {
             return Ok(());
         }
 
         let ev = UiEvent::new(ev, self.twle_hr_format, self.wallclock_offset_ns);
 
         if self
-            .filter_state
+            .sev_state
             .selected()
             .is_none_or(|i| ev.severity == SEVERITY_FILTERS[i].0)
         {
@@ -361,7 +365,25 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(idx) = row_at(self.filter_area, mouse.column, mouse.row) {
+                if let Some(idx) = row_at(
+                    self.sev_area,
+                    mouse.column,
+                    mouse.row,
+                    SEVERITY_FILTERS.len(),
+                ) {
+                    if self.sev_state.selected() == Some(idx) {
+                        self.sev_state.select(None);
+                    } else {
+                        self.sev_state.select(Some(idx));
+                    }
+                }
+
+                if let Some(idx) = row_at(
+                    self.filter_area,
+                    mouse.column,
+                    mouse.row,
+                    FILTEREVENTS.len(),
+                ) {
                     if self.filter_state.selected() == Some(idx) {
                         self.filter_state.select(None);
                     } else {

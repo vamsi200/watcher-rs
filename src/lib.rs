@@ -9,7 +9,8 @@ pub use bpfx::{file::*, network::*, process::*};
 use std::fs::read_link;
 use std::path::PathBuf;
 
-use crate::detection::ClassifiedFileEvent;
+use crate::app::FILTEREVENTS;
+use crate::detection::Classified;
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct ProcessInfo {
@@ -91,21 +92,22 @@ impl Severity {
 pub enum AppEvent {
     Exec(ProcessStartEvent),
     ExecExit(ProcessExitEvent),
-    File(ClassifiedFileEvent),
-    FileClose(FileCloseEvent),
+    File(Classified<FileOpenEvent>),
+    FileClose(Classified<FileCloseEvent>),
     Network(AcceptEvent),
     // Process(ProcessEvent),
 }
 
 impl AppEvent {
-    pub fn matches_filter(&self, filter: &str) -> bool {
-        match filter {
+    pub fn matches_filter(&self, filter_idx: usize) -> bool {
+        let val = FILTEREVENTS[filter_idx];
+        match val {
             "All" => true,
-            "ExecEvent" => matches!(self, AppEvent::Exec(_)),
-            "ExecExitEvent" => matches!(self, AppEvent::ExecExit(_)),
-            "FileEvent" => matches!(self, AppEvent::File(_)),
-            "FileCloseEvent" => matches!(self, AppEvent::FileClose(_)),
-            "NetworkEvent" => matches!(self, AppEvent::Network(_)),
+            "ExecStart" => matches!(self, AppEvent::Exec(_)),
+            "ExecExit" => matches!(self, AppEvent::ExecExit(_)),
+            "FileOpen" => matches!(self, AppEvent::File(_)),
+            "FileClose" => matches!(self, AppEvent::FileClose(_)),
+            "Network" => matches!(self, AppEvent::Network(_)),
             // "ProcessEvent" => matches!(self, AppEvent::Process(_)),
             _ => false,
         }
@@ -116,7 +118,7 @@ impl AppEvent {
             AppEvent::Exec(e) => e.header.timestamp_ns,
             AppEvent::ExecExit(e) => e.header.timestamp_ns,
             AppEvent::File(e) => e.event.header.timestamp_ns,
-            AppEvent::FileClose(e) => e.header.timestamp_ns,
+            AppEvent::FileClose(e) => e.event.header.timestamp_ns,
             AppEvent::Network(e) => e.header.timestamp_ns,
             // AppEvent::Process(e) => e.timestamp,
         }
@@ -127,7 +129,7 @@ impl AppEvent {
             AppEvent::Exec(e) => e.header.pid,
             AppEvent::ExecExit(e) => e.header.pid,
             AppEvent::File(e) => e.event.header.pid,
-            AppEvent::FileClose(e) => e.header.pid,
+            AppEvent::FileClose(e) => e.event.header.pid,
             AppEvent::Network(e) => e.header.pid,
             // AppEvent::Process(e) => e.info.pid,
         }
@@ -177,7 +179,7 @@ impl AppEvent {
                 format!("file_path={}", e.event.file_path)
             }
             AppEvent::FileClose(e) => {
-                format!("close {}", &e.header.comm)
+                format!("close {}", &e.event.header.comm)
             }
             AppEvent::Network(e) => {
                 let addr = e.endpoints.remote_ip.to_string(); // TODO: recheck this

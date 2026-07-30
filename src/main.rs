@@ -143,6 +143,7 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
 
     let handle = bpf.run();
     let mut file_event_filter = FileEventFilter::new();
+    let file_classifer = FileClassifier::new();
 
     loop {
         tokio::select! {
@@ -197,7 +198,7 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
 
                 match event {
                     FileEvent::Open(e) => {
-                        let event = classify_file_events(e);
+                        let event = file_classifer.classify_open(e);
                         // if event.severity == Severity::Low {
                         //     continue;
                         // }
@@ -212,7 +213,9 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
                     }
 
                     FileEvent::Close(e) => {
-                        if tx.send(AppEvent::FileClose(e)).await.is_err() {
+                        let event = file_classifer.classify_close(e);
+
+                        if tx.send(AppEvent::FileClose(event)).await.is_err() {
                             return Ok(());
                         }
                     }
@@ -249,6 +252,16 @@ async fn main() -> color_eyre::Result<()> {
 
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture,)?;
+
+    let process_map: HashMap<u32, ProcessInfo> = HashMap::new(); //TODO
+    let engine = RuleEngine {
+        rules: vec![
+            Box::new(TempExecutableRule),
+            Box::new(RootWriteRule),
+            Box::new(SensitivePathRule),
+            Box::new(FlagRule),
+        ],
+    };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AppEvent>(10000);
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
