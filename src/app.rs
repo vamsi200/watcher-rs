@@ -27,6 +27,9 @@ use ratatui::{DefaultTerminal, widgets::ScrollbarState};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -235,10 +238,6 @@ impl App {
         Self::default()
     }
 
-    fn batch_count(&self) -> anyhow::Result<usize> {
-        Ok(read_batch_info()?.len())
-    }
-
     fn ensure_batches_loaded(&mut self, global_selected: usize) -> anyhow::Result<()> {
         if self.total_batches == 0 {
             return Ok(());
@@ -283,11 +282,7 @@ impl App {
         Ok(())
     }
 
-    pub async fn push(
-        &mut self,
-        ev: AppEvent,
-        mut writer_tx: Sender<UiEvent>,
-    ) -> anyhow::Result<()> {
+    pub async fn push(&mut self, ev: AppEvent, writer_tx: &Sender<UiEvent>) -> anyhow::Result<()> {
         if self.event_name.is_empty() {
             self.event_name.push_str("All");
         }
@@ -476,8 +471,10 @@ impl App {
             KeyCode::Char('g') => {
                 if self.g_char {
                     self.g_char = false;
+                    self.follow_tail = false;
 
                     if self.view_mode == ViewMode::History {
+                        tracing::info!("in history.");
                         if let Err(e) = self.ensure_batches_loaded(0) {
                             tracing::error!("failed to load batch: {e}");
                             return;
@@ -516,6 +513,7 @@ impl App {
                     self.get_selected();
                 }
             }
+
             KeyCode::Char('q') => self.running = false,
             KeyCode::Char('/') => {
                 self.searching = true;
@@ -558,12 +556,27 @@ impl App {
         while self.running {
             while let Ok(event) = rx.try_recv() {
                 if !self.pause {
-                    self.push(event, writer_tx.clone()).await;
+                    self.push(event, &writer_tx).await;
                 }
             }
 
-            while let Ok(_) = batch_rx.try_recv() {
+            let mut changed = false;
+            while batch_rx.try_recv().is_ok() {
+                changed = true;
+            }
+
+            if changed {
                 self.total_batches = read_batch_info().unwrap().len();
+
+                if self.follow_tail {
+                    tracing::info!("following new events");
+                    let last_global = self.total_batches * PER_BATCH_SIZE - 1;
+                    self.ensure_batches_loaded(last_global).unwrap();
+                    self.view_port.window_start = self.loaded_range.0 * PER_BATCH_SIZE;
+                    self.stream_state
+                        .select(Some(self.filtered_events.len().saturating_sub(1)));
+                    self.get_selected();
+                }
             }
 
             if last_tick.elapsed() >= tick_rate {

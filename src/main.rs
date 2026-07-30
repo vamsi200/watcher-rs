@@ -12,6 +12,7 @@ use futures::StreamExt;
 use lru::LruCache;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, restore};
+use std::fs::OpenOptions;
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
@@ -252,7 +253,7 @@ async fn main() -> color_eyre::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AppEvent>(10000);
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<UiEvent>(10000);
-    let (batch_ready_tx, mut batch_ready_rx) = tokio::sync::mpsc::channel::<bool>(1000);
+    let (batch_ready_tx, mut batch_ready_rx) = tokio::sync::mpsc::channel::<bool>(100);
 
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
