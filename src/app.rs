@@ -62,8 +62,6 @@ pub enum RenderRow {
     Event(usize),
 }
 
-const EVENT_BATCH_SIZE: usize = 1024;
-
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
 pub struct UiEvent {
     pub event: AppEvent,
@@ -106,7 +104,6 @@ pub struct App {
     pub searching: bool,
     pub search_query: String,
     pub pause: bool,
-    pub filter_mode: bool,
     pub event_idx: usize,
     pub event_name: &'static str,
     pub g_char: bool,
@@ -163,7 +160,6 @@ impl Default for App {
             searching: false,
             search_query: String::new(),
             pause: false,
-            filter_mode: false,
             event_idx: 0,
             event_name: "",
             g_char: false,
@@ -464,43 +460,6 @@ impl App {
             }
         }
 
-        // if self.filter_mode {
-        //     match key.code {
-        //         KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-        //             self.event_name.clear();
-        //         }
-        //         KeyCode::Char(c) => {
-        //             self.event_name.push(c);
-        //         }
-        //         KeyCode::Backspace => {
-        //             self.event_name.pop();
-        //         }
-        //         KeyCode::Up => {
-        //             if self.event_idx > 0 {
-        //                 self.event_idx -= 1;
-        //             }
-        //         }
-        //         KeyCode::Down => {
-        //             if self.event_idx + 1 < FILTEREVENTS.len() {
-        //                 self.event_idx += 1;
-        //             }
-        //         }
-        //         KeyCode::Enter => {
-        //             let fv = FILTEREVENTS.get(self.event_idx).unwrap_or(&"All");
-        //             self.event_name.clear();
-        //             self.event_name.push_str(fv);
-        //             self.filter_mode = false;
-        //             self.selected_tab = Focus::Stream;
-        //         }
-        //         KeyCode::Esc => {
-        //             self.filter_mode = false;
-        //             self.selected_tab = Focus::Stream;
-        //         }
-        //
-        //         _ => {}
-        //     }
-        // }
-
         match key.code {
             KeyCode::Tab => {
                 self.selected_tab = match self.selected_tab {
@@ -518,6 +477,23 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.selected_tab == Focus::Stream {
                     self.scroll_down()
+                }
+            }
+            KeyCode::Enter => {
+                let idx = self.stream_state.selected().unwrap_or(0);
+                match self.row_map.get(idx) {
+                    Some(RenderRow::Group(key)) => {
+                        let key = key.clone();
+                        if self.expanded_groups.contains(&key) {
+                            self.expanded_groups.remove(&key);
+                        } else {
+                            self.expanded_groups.insert(key);
+                        }
+                    }
+                    Some(RenderRow::Event(ev_idx)) => {
+                        self.selected_event = self.events.get(*ev_idx).cloned();
+                    }
+                    None => {}
                 }
             }
             KeyCode::Char('g') => {
@@ -541,42 +517,40 @@ impl App {
             }
 
             KeyCode::Char('G') => {
+                if !self.pause {
+                    tracing::info!("setting follow_tail true");
+                    self.follow_tail = true;
+                }
+
+                if let Some(last_group_idx) = self
+                    .row_map
+                    .iter()
+                    .rposition(|r| matches!(r, RenderRow::Group(_)))
+                {
+                    self.stream_state.select(Some(last_group_idx));
+                    self.get_selected();
+                }
+
                 if self.total_batches == 0 {
                     return;
                 }
 
-                if !self.pause {
-                    self.follow_tail = true;
-                }
-
                 let last_global = self.total_batches * PER_BATCH_SIZE - 1;
-
                 if self.view_mode == ViewMode::History {
                     if let Err(e) = self.ensure_batches_loaded(last_global) {
                         tracing::error!("failed to load batch: {e}");
                         return;
                     }
                 }
-
-                if !self.filtered_events.is_empty() {
-                    self.view_port.window_start = self.loaded_range.0 * PER_BATCH_SIZE;
-                    self.stream_state
-                        .select(Some(self.filtered_events.len() - 1));
-                    self.get_selected();
-                }
             }
 
             KeyCode::Char('q') => self.running = false,
-            KeyCode::Char('/') => {
-                self.searching = true;
-                self.search_query.clear();
-            }
             KeyCode::Char('t') => {
                 self.twle_hr_format = !self.twle_hr_format;
             }
-            KeyCode::Char('f') => {
-                self.filter_mode = true;
-                self.selected_tab = Focus::Filter;
+            KeyCode::Char('f') | KeyCode::Char('/') => {
+                self.searching = true;
+                self.search_query.clear();
             }
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 tracing::info!("clearning..");
@@ -714,12 +688,10 @@ impl App {
             self.selected_event = None;
             return;
         };
-
-        if let Some(&idx) = self.filtered_events.get(selected) {
-            self.selected_event = self.events.get(idx).cloned();
-        } else {
-            self.selected_event = None;
-        }
+        self.selected_event = match self.row_map.get(selected) {
+            Some(RenderRow::Event(idx)) => self.events.get(*idx).cloned(),
+            _ => None,
+        };
     }
 
     pub fn search_push(&mut self, c: char) {

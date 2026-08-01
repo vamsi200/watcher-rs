@@ -73,6 +73,7 @@ const TIME_W: usize = 15;
 const SEV_W: usize = 10;
 const PID_W: usize = 17;
 const TYPE_W: usize = 20;
+const TREE_W: usize = 3;
 
 fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = if app.selected_tab == Focus::Stream {
@@ -115,22 +116,13 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
 
     app.stream_area = inner;
 
-    let bg = if app.selected_tab == crate::app::Focus::Stream {
-        C_BLUE
-    } else {
-        C_BG
-    };
-
-    let line = Line::from(vec![
-        Span::raw(" "),
-        Span::styled(
-            format!(
-                " {:<TIME_W$} {:<SEV_W$} {:<PID_W$} {:<TYPE_W$}DETAIL",
-                "TIME", "SEV", "PID/PROC", "TYPE",
-            ),
-            Style::default().fg(C_MUTED).bg(C_BG2),
+    let line = Line::from(vec![Span::styled(
+        format!(
+            "{:<TREE_W$}{:<TIME_W$} {:<SEV_W$} {:<PID_W$} {:<TYPE_W$}",
+            "", "TIME", "SEV", "PID/PROC", "TYPE",
         ),
-    ]);
+        Style::default().fg(C_MUTED).bg(C_BG2),
+    )]);
 
     frame.render_widget(
         Paragraph::new(line).style(Style::default().bg(C_BG2)),
@@ -156,28 +148,40 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
 
     for (key, indices) in &app.grouped {
         let is_expanded = app.expanded_groups.contains(key);
-        let arrow = if is_expanded { "▼" } else { "▶" };
+        let arrow = if is_expanded { "▾" } else { " ▸" };
         let sev_col = sev_color(&key.severity);
 
+        let first_ts = indices
+            .first()
+            .map(|&idx| app.events[idx].timestamp.as_str())
+            .unwrap_or("");
+
         let header = Line::from(vec![
-            Span::styled(format!("{arrow} "), Style::default().fg(C_MUTED).bg(C_BG)),
             Span::styled(
-                format!("{:<SEV_W$}", key.severity.label()),
+                format!("{arrow:<TREE_W$}"),
+                Style::default().fg(C_MUTED).bg(C_BG),
+            ),
+            Span::styled(
+                format!("{:<TIME_W$} ", &first_ts[..11.min(first_ts.len())]),
+                Style::default().fg(C_MUTED).bg(C_BG),
+            ),
+            Span::styled(
+                format!("{:<SEV_W$} ", key.severity.label()),
                 Style::default()
                     .fg(sev_col)
                     .bg(C_BG)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(" pid {:<PID_W$}", key.pid),
+                format!("{:<PID_W$} ", key.pid),
                 Style::default().fg(C_TEXT).bg(C_BG),
             ),
             Span::styled(
-                format!(" {:?}", key.event_type),
+                format!("{:<TYPE_W$}", format!("{:?}", key.event_type)),
                 Style::default().fg(C_PURPLE).bg(C_BG),
             ),
             Span::styled(
-                format!(" ({} events)", indices.len()),
+                format!("({} events)", indices.len()),
                 Style::default().fg(C_MUTED).bg(C_BG),
             ),
         ]);
@@ -185,18 +189,29 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         row_map.push(RenderRow::Group(key.clone()));
 
         if is_expanded {
-            for &ev_idx in indices {
+            for (i, &ev_idx) in indices.iter().enumerate() {
                 let event = &app.events[ev_idx];
                 let ts = &event.timestamp;
                 let detail = &event.detail;
+                let is_last = i == indices.len() - 1;
+                let ts_len = first_ts.len() / 2;
+                let branch = if is_last {
+                    format!("{:<ts_len$}└─ ", "")
+                } else {
+                    format!("{:<ts_len$}├─ ", "")
+                };
+
                 let child = Line::from(vec![
-                    Span::raw("    "),
                     Span::styled(
-                        format!("{:<TIME_W$}", &ts[..11.min(ts.len())]),
+                        format!("{branch:<TREE_W$}"),
                         Style::default().fg(C_MUTED).bg(C_BG),
                     ),
                     Span::styled(
-                        format!(" {}", detail),
+                        format!("{:<TIME_W$} ", &ts[..11.min(ts.len())]),
+                        Style::default().fg(C_MUTED).bg(C_BG),
+                    ),
+                    Span::styled(
+                        detail.to_string(),
                         Style::default().fg(detail_color(event)).bg(C_BG),
                     ),
                 ]);
@@ -502,13 +517,20 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
             kv(&mut lines, "pid", &e.event.header.pid.to_string(), C_TEXT);
             kv(
                 &mut lines,
+                "ppid",
+                &e.event.header.ppid.to_string(),
+                C_MUTED,
+            );
+            kv(
+                &mut lines,
                 "uid",
                 &uid_label(e.event.header.uid),
                 uid_color(e.event.header.uid),
             );
+            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
+
             lines.push(Line::from(""));
             section(&mut lines, "FILE");
-
             let op = &e.event.file_type;
             let file_name = &e.event.file_name().to_string();
             let file_path = &e.event.file_path;
@@ -518,6 +540,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 C_PATH
             };
             kv(&mut lines, "filepath ", file_path, path_col);
+            kv(&mut lines, "filename ", file_name, C_TEXT);
             kv(&mut lines, "op", &format!("{op:?}"), C_TEXT);
             kv(
                 &mut lines,
@@ -531,6 +554,15 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 &format!("{:?}", e.event.file_type),
                 C_MUTED,
             );
+
+            let ok = e.event.retval >= 0;
+            kv(
+                &mut lines,
+                "retval",
+                &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
+                if ok { C_TEXT } else { C_RED },
+            );
+            kv(&mut lines, "inode", &e.event.inode.to_string(), C_MUTED);
         }
         AppEvent::FileClose(e) => {
             section(&mut lines, "FILE");
@@ -635,14 +667,12 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             if app.pause { " resume  " } else { " pause  " },
             Style::default().fg(C_MUTED).bg(C_BG2),
         ),
-        key("/"),
-        // Span::styled(" search  ", Style::default().fg(C_MUTED).bg(C_BG2)),
-        // key("f"),
+        key("/ or f"),
         Span::styled(" filter  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("t"),
-        Span::styled("  Clear  ", Style::default().fg(C_MUTED).bg(C_BG2)),
-        key("Ctrl + l"),
         Span::styled(" 12/24 format  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        key("Ctrl + l"),
+        Span::styled(" Clear  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("Esc"),
         Span::styled(" back/dismiss  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("q"),

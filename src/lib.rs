@@ -191,12 +191,7 @@ impl AppEvent {
             AppEvent::ExecExit(e) => {
                 format!("pid {} exited", e.header.pid)
             }
-            AppEvent::File(e) => {
-                // let op = &e.event.flags();
-                // let path = &e.event.file_path;
-
-                format!("file_path={}", e.event.file_path)
-            }
+            AppEvent::File(e) => e.event.file_path.clone(),
             AppEvent::FileClose(e) => {
                 format!("close {}", &e.event.header.comm)
             }
