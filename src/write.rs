@@ -20,7 +20,7 @@ use bpfx::file::*;
 use bpfx::network::*;
 use bpfx::process::*;
 
-pub const PER_BATCH_SIZE: usize = 200;
+pub const PER_BATCH_SIZE: usize = 5000;
 
 #[derive(Debug, Clone, Copy, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub struct BatchInfo {

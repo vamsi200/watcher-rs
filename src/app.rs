@@ -1,5 +1,6 @@
 #![allow(unused)]
 use crate::AppEvent;
+use crate::EventType;
 use crate::Severity;
 use crate::helper::format_timestamp_ns;
 use crate::ui::*;
@@ -25,6 +26,7 @@ use ratatui::layout::Position;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use ratatui::{DefaultTerminal, widgets::ScrollbarState};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -45,6 +47,19 @@ use crossterm::execute;
 pub enum ViewMode {
     Live,
     History,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
+pub struct GroupKey {
+    pub severity: Severity,
+    pub pid: u32,
+    pub event_type: EventType,
+}
+
+#[derive(Debug)]
+pub enum RenderRow {
+    Group(GroupKey),
+    Event(usize),
 }
 
 const EVENT_BATCH_SIZE: usize = 1024;
@@ -93,7 +108,7 @@ pub struct App {
     pub pause: bool,
     pub filter_mode: bool,
     pub event_idx: usize,
-    pub event_name: String,
+    pub event_name: &'static str,
     pub g_char: bool,
     pub twle_hr_format: bool,
     pub wallclock_offset_ns: u64,
@@ -109,6 +124,9 @@ pub struct App {
     pub loaded_range: (usize, usize),
     pub total_batches: usize,
     pub follow_tail: bool,
+    pub grouped: BTreeMap<GroupKey, Vec<usize>>,
+    pub expanded_groups: std::collections::HashSet<GroupKey>,
+    pub row_map: Vec<RenderRow>,
 }
 
 #[derive(Debug)]
@@ -147,7 +165,7 @@ impl Default for App {
             pause: false,
             filter_mode: false,
             event_idx: 0,
-            event_name: String::new(),
+            event_name: "",
             g_char: false,
             twle_hr_format: false,
             wallclock_offset_ns: 0,
@@ -166,6 +184,9 @@ impl Default for App {
             total_batches: 0,
             follow_tail: false,
             sev_area: Rect::default(),
+            grouped: BTreeMap::new(),
+            expanded_groups: HashSet::new(),
+            row_map: Vec::new(),
         }
     }
 }
@@ -213,16 +234,9 @@ fn row_at_stream(app: &App, col: u16, row: u16) -> Option<usize> {
     if !area.contains(Position::new(col, row)) {
         return None;
     }
-
-    let rel = row - area.y;
-
-    if rel == 0 {
-        return None;
-    }
-
-    let idx = (rel - 1) as usize;
-
-    (idx < app.filtered_events.len()).then_some(idx)
+    let rel = (row - area.y) as usize;
+    let idx = rel + app.stream_state.offset() - 1;
+    (idx < app.row_map.len()).then_some(idx)
 }
 
 pub const FILTEREVENTS: [&str; 9] = [
@@ -240,6 +254,17 @@ pub const FILTEREVENTS: [&str; 9] = [
 impl App {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn index_event(&mut self, idx: usize) {
+        let event = &mut self.events[idx];
+        let key = GroupKey {
+            severity: event.severity,
+            pid: event.event.pid(),
+            event_type: event.event.event_type(),
+        };
+
+        self.grouped.entry(key).or_default().push(idx);
     }
 
     fn ensure_batches_loaded(&mut self, global_selected: usize) -> anyhow::Result<()> {
@@ -267,6 +292,7 @@ impl App {
     fn load_batch_range(&mut self, lo: usize, hi: usize) -> anyhow::Result<()> {
         self.events.clear();
         self.filtered_events.clear();
+        self.grouped.clear();
 
         for b in lo..=hi {
             let batch_events = read_batch(b)?;
@@ -277,6 +303,7 @@ impl App {
                     || match_query(&self.events[idx], &self.search_query)
                 {
                     self.filtered_events.push(idx);
+                    self.index_event(idx);
                 }
             }
         }
@@ -288,10 +315,13 @@ impl App {
 
     pub async fn push(&mut self, ev: AppEvent, writer_tx: &Sender<UiEvent>) -> anyhow::Result<()> {
         if self.event_name.is_empty() {
-            self.event_name.push_str("All");
+            self.event_name = "All";
         }
 
-        if !ev.matches_filter(self.filter_state.selected().unwrap_or(0)) {
+        let filter = ev.matches_filter(self.filter_state.selected().unwrap_or(0));
+        self.event_name = filter.1;
+
+        if !filter.0 {
             return Ok(());
         }
 
@@ -322,6 +352,7 @@ impl App {
                         || match_query(&self.events[idx], &self.search_query)
                     {
                         self.filtered_events.push(idx);
+                        self.index_event(idx);
                     }
                 }
 
@@ -377,7 +408,6 @@ impl App {
                         self.sev_state.select(Some(idx));
                     }
                 }
-
                 if let Some(idx) = row_at(
                     self.filter_area,
                     mouse.column,
@@ -390,26 +420,26 @@ impl App {
                         self.filter_state.select(Some(idx));
                     }
                 }
-            }
-
-            _ => {}
-        }
-
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(idx) = row_at_stream(self, mouse.column, mouse.row) {
                     self.stream_state.select(Some(idx));
+                    match self.row_map.get(idx) {
+                        Some(RenderRow::Group(key)) => {
+                            let key = key.clone();
+                            if self.expanded_groups.contains(&key) {
+                                self.expanded_groups.remove(&key);
+                            } else {
+                                self.expanded_groups.insert(key);
+                            }
+                        }
+                        Some(RenderRow::Event(ev_idx)) => {
+                            self.selected_event = self.events.get(*ev_idx).cloned();
+                        }
+                        None => {}
+                    }
                 }
             }
-
-            MouseEventKind::ScrollDown => {
-                self.scroll_down();
-            }
-
-            MouseEventKind::ScrollUp => {
-                self.scroll_up();
-            }
-
+            MouseEventKind::ScrollDown => self.scroll_down(),
+            MouseEventKind::ScrollUp => self.scroll_up(),
             _ => {}
         }
     }
@@ -434,42 +464,42 @@ impl App {
             }
         }
 
-        if self.filter_mode {
-            match key.code {
-                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.event_name.clear();
-                }
-                KeyCode::Char(c) => {
-                    self.event_name.push(c);
-                }
-                KeyCode::Backspace => {
-                    self.event_name.pop();
-                }
-                KeyCode::Up => {
-                    if self.event_idx > 0 {
-                        self.event_idx -= 1;
-                    }
-                }
-                KeyCode::Down => {
-                    if self.event_idx + 1 < FILTEREVENTS.len() {
-                        self.event_idx += 1;
-                    }
-                }
-                KeyCode::Enter => {
-                    let fv = FILTEREVENTS.get(self.event_idx).unwrap_or(&"All");
-                    self.event_name.clear();
-                    self.event_name.push_str(fv);
-                    self.filter_mode = false;
-                    self.selected_tab = Focus::Stream;
-                }
-                KeyCode::Esc => {
-                    self.filter_mode = false;
-                    self.selected_tab = Focus::Stream;
-                }
-
-                _ => {}
-            }
-        }
+        // if self.filter_mode {
+        //     match key.code {
+        //         KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        //             self.event_name.clear();
+        //         }
+        //         KeyCode::Char(c) => {
+        //             self.event_name.push(c);
+        //         }
+        //         KeyCode::Backspace => {
+        //             self.event_name.pop();
+        //         }
+        //         KeyCode::Up => {
+        //             if self.event_idx > 0 {
+        //                 self.event_idx -= 1;
+        //             }
+        //         }
+        //         KeyCode::Down => {
+        //             if self.event_idx + 1 < FILTEREVENTS.len() {
+        //                 self.event_idx += 1;
+        //             }
+        //         }
+        //         KeyCode::Enter => {
+        //             let fv = FILTEREVENTS.get(self.event_idx).unwrap_or(&"All");
+        //             self.event_name.clear();
+        //             self.event_name.push_str(fv);
+        //             self.filter_mode = false;
+        //             self.selected_tab = Focus::Stream;
+        //         }
+        //         KeyCode::Esc => {
+        //             self.filter_mode = false;
+        //             self.selected_tab = Focus::Stream;
+        //         }
+        //
+        //         _ => {}
+        //     }
+        // }
 
         match key.code {
             KeyCode::Tab => {
@@ -548,6 +578,16 @@ impl App {
                 self.filter_mode = true;
                 self.selected_tab = Focus::Filter;
             }
+            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                tracing::info!("clearning..");
+                self.view_mode = ViewMode::Live;
+                self.events.clear();
+                self.filtered_events.clear();
+                self.grouped.clear();
+                self.view_port.window_start = 0;
+                self.stream_state.select(None);
+                self.selected_event = None;
+            }
             KeyCode::Char('p') => self.pause = !self.pause,
             _ => {
                 self.g_char = false;
@@ -564,7 +604,7 @@ impl App {
         mut batch_rx: Receiver<bool>,
     ) -> color_eyre::Result<()> {
         let mut last_tick = std::time::Instant::now();
-        let tick_rate = Duration::from_millis(50);
+        let tick_rate = Duration::from_millis(100);
         let mut changed = false;
         let realtime_ns = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
@@ -697,9 +737,10 @@ impl App {
     }
 
     pub fn selected_event(&self) -> Option<&UiEvent> {
-        self.filtered_events
-            .get(self.stream_state.selected().unwrap_or(0))
-            .and_then(|&idx| self.events.get(idx))
+        match self.row_map.get(self.stream_state.selected()?)? {
+            RenderRow::Event(idx) => self.events.get(*idx),
+            RenderRow::Group(_) => None,
+        }
     }
 }
 

@@ -65,6 +65,7 @@ pub struct SuspiciousEvent {
     Copy,
     Eq,
     Ord,
+    Hash,
 )]
 pub enum Severity {
     Info,
@@ -86,6 +87,15 @@ impl Severity {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
+pub enum EventType {
+    ExecStart,
+    ExecExit,
+    FileOpen,
+    FileClose,
+    AcceptEvent,
+}
+
 #[derive(
     Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
@@ -99,17 +109,26 @@ pub enum AppEvent {
 }
 
 impl AppEvent {
-    pub fn matches_filter(&self, filter_idx: usize) -> bool {
+    pub fn event_type(&mut self) -> EventType {
+        match self {
+            AppEvent::Exec(_) => EventType::ExecStart,
+            AppEvent::ExecExit(_) => EventType::ExecExit,
+            AppEvent::File(_) => EventType::FileOpen,
+            AppEvent::FileClose(_) => EventType::FileClose,
+            AppEvent::Network(_) => EventType::AcceptEvent,
+        }
+    }
+    pub fn matches_filter(&self, filter_idx: usize) -> (bool, &'static str) {
         let val = FILTEREVENTS[filter_idx];
         match val {
-            "All" => true,
-            "ExecStart" => matches!(self, AppEvent::Exec(_)),
-            "ExecExit" => matches!(self, AppEvent::ExecExit(_)),
-            "FileOpen" => matches!(self, AppEvent::File(_)),
-            "FileClose" => matches!(self, AppEvent::FileClose(_)),
-            "Network" => matches!(self, AppEvent::Network(_)),
+            "All" => (true, "All"),
+            "ExecStart" => (matches!(self, AppEvent::Exec(_)), "ExecStart"),
+            "ExecExit" => (matches!(self, AppEvent::ExecExit(_)), "ExecExit"),
+            "FileOpen" => (matches!(self, AppEvent::File(_)), "FileOpen"),
+            "FileClose" => (matches!(self, AppEvent::FileClose(_)), "FileClose"),
+            "Network" => (matches!(self, AppEvent::Network(_)), "Network"),
             // "ProcessEvent" => matches!(self, AppEvent::Process(_)),
-            _ => false,
+            _ => (false, "None"),
         }
     }
 

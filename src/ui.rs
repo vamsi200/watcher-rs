@@ -1,7 +1,7 @@
 #![allow(unused)]
 use std::process::id;
 
-use crate::app::{App, FILTEREVENTS, Focus, UiEvent, ViewMode};
+use crate::app::{App, FILTEREVENTS, Focus, RenderRow, UiEvent, ViewMode};
 use crate::write::{BatchInfo, PER_BATCH_SIZE};
 use crate::*;
 use ratatui::Frame;
@@ -146,57 +146,72 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.view_mode == ViewMode::Live && app.filtered_events.len() >= PER_BATCH_SIZE {
         app.view_mode = ViewMode::History;
         app.current_batch = 0;
-        app.view_port.window_start = app.sev_state.selected().unwrap_or(0);
+        app.view_port.window_start = 0;
     }
 
     let selected = app.stream_state.selected().unwrap_or(0);
 
-    let mut items: Vec<ListItem> = Vec::with_capacity(app.filtered_events.len());
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut row_map: Vec<RenderRow> = Vec::new();
 
-    for (i, &ev_idx) in app.filtered_events.iter().enumerate() {
-        let event: &UiEvent = &app.events[ev_idx];
-        let sev = &event.severity;
-        let is_sel = selected == i;
-        let sev_col = sev_color(&sev);
-        let ts = &event.timestamp;
-        let pid = event.event.pid();
-        let kind = &event.kind;
-        let detail = &event.detail;
-        let border_char = if is_sel { "▶" } else { " " };
-        let bg = if is_sel { C_BG3 } else { C_BG };
+    for (key, indices) in &app.grouped {
+        let is_expanded = app.expanded_groups.contains(key);
+        let arrow = if is_expanded { "▼" } else { "▶" };
+        let sev_col = sev_color(&key.severity);
 
-        let line = Line::from(vec![
-            Span::styled(border_char, Style::default().fg(sev_col).bg(bg)),
+        let header = Line::from(vec![
+            Span::styled(format!("{arrow} "), Style::default().fg(C_MUTED).bg(C_BG)),
             Span::styled(
-                format!(" {:<TIME_W$}", &ts[..11.min(ts.len())]),
-                Style::default().fg(C_MUTED).bg(bg),
-            ),
-            Span::styled(
-                format!(" {:<SEV_W$}", sev.label()),
+                format!("{:<SEV_W$}", key.severity.label()),
                 Style::default()
                     .fg(sev_col)
-                    .bg(bg)
+                    .bg(C_BG)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(" {:<PID_W$}", pid),
-                Style::default().fg(C_TEXT).bg(bg),
+                format!(" pid {:<PID_W$}", key.pid),
+                Style::default().fg(C_TEXT).bg(C_BG),
             ),
             Span::styled(
-                format!(" {:<TYPE_W$}", kind.trim()),
-                Style::default().fg(C_PURPLE).bg(bg),
+                format!(" {:?}", key.event_type),
+                Style::default().fg(C_PURPLE).bg(C_BG),
             ),
-            Span::styled(detail, Style::default().fg(detail_color(event)).bg(bg)),
+            Span::styled(
+                format!(" ({} events)", indices.len()),
+                Style::default().fg(C_MUTED).bg(C_BG),
+            ),
         ]);
+        items.push(ListItem::new(header));
+        row_map.push(RenderRow::Group(key.clone()));
 
-        items.push(ListItem::new(line));
+        if is_expanded {
+            for &ev_idx in indices {
+                let event = &app.events[ev_idx];
+                let ts = &event.timestamp;
+                let detail = &event.detail;
+                let child = Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(
+                        format!("{:<TIME_W$}", &ts[..11.min(ts.len())]),
+                        Style::default().fg(C_MUTED).bg(C_BG),
+                    ),
+                    Span::styled(
+                        format!(" {}", detail),
+                        Style::default().fg(detail_color(event)).bg(C_BG),
+                    ),
+                ]);
+                items.push(ListItem::new(child));
+                row_map.push(RenderRow::Event(ev_idx));
+            }
+        }
     }
 
-    items.push(ListItem::new(Line::from("")));
+    app.row_map = row_map;
 
-    let list = List::new(items).style(Style::default().bg(C_BG));
+    let list = List::new(items)
+        .style(Style::default().bg(C_BG))
+        .highlight_style(Style::default().bg(C_BG3));
     frame.render_stateful_widget(list, list_area, &mut app.stream_state);
-
     render_scrollbar(frame, inner, selected, total);
 }
 
@@ -621,10 +636,12 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(C_MUTED).bg(C_BG2),
         ),
         key("/"),
-        Span::styled(" search  ", Style::default().fg(C_MUTED).bg(C_BG2)),
-        key("f"),
+        // Span::styled(" search  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        // key("f"),
         Span::styled(" filter  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("t"),
+        Span::styled("  Clear  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        key("Ctrl + l"),
         Span::styled(" 12/24 format  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("Esc"),
         Span::styled(" back/dismiss  ", Style::default().fg(C_MUTED).bg(C_BG2)),
