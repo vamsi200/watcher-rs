@@ -146,15 +146,12 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut items: Vec<ListItem> = Vec::new();
     let mut row_map: Vec<RenderRow> = Vec::new();
 
-    for (key, indices) in &app.grouped {
-        let is_expanded = app.expanded_groups.contains(key);
+    for (group_idx, group) in app.groups.iter().enumerate() {
+        let is_expanded = app.expanded_groups.contains(&group.id);
         let arrow = if is_expanded { "▾" } else { " ▸" };
-        let sev_col = sev_color(&key.severity);
+        let sev_col = sev_color(&group.key.severity);
 
-        let first_ts = indices
-            .first()
-            .map(|&idx| app.events[idx].timestamp.as_str())
-            .unwrap_or("");
+        let first_ts = app.events[group.start].timestamp.as_str();
 
         let header = Line::from(vec![
             Span::styled(
@@ -166,35 +163,38 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(C_MUTED).bg(C_BG),
             ),
             Span::styled(
-                format!("{:<SEV_W$} ", key.severity.label()),
+                format!("{:<SEV_W$} ", group.key.severity.label()),
                 Style::default()
                     .fg(sev_col)
                     .bg(C_BG)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{:<PID_W$} ", key.pid),
+                format!("{:<PID_W$} ", group.key.pid),
                 Style::default().fg(C_TEXT).bg(C_BG),
             ),
             Span::styled(
-                format!("{:<TYPE_W$}", format!("{:?}", key.event_type)),
+                format!("{:<TYPE_W$}", format!("{:?}", group.key.event_type)),
                 Style::default().fg(C_PURPLE).bg(C_BG),
             ),
             Span::styled(
-                format!("({} events)", indices.len()),
+                format!("({} events)", group.count),
                 Style::default().fg(C_MUTED).bg(C_BG),
             ),
         ]);
+
         items.push(ListItem::new(header));
-        row_map.push(RenderRow::Group(key.clone()));
+        row_map.push(RenderRow::Group(group.id));
 
         if is_expanded {
-            for (i, &ev_idx) in indices.iter().enumerate() {
+            for ev_idx in group.start..=group.end {
                 let event = &app.events[ev_idx];
                 let ts = &event.timestamp;
                 let detail = &event.detail;
-                let is_last = i == indices.len() - 1;
+
+                let is_last = ev_idx == group.end;
                 let ts_len = first_ts.len() / 2;
+
                 let branch = if is_last {
                     format!("{:<ts_len$}└─ ", "")
                 } else {
@@ -215,6 +215,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
                         Style::default().fg(detail_color(event)).bg(C_BG),
                     ),
                 ]);
+
                 items.push(ListItem::new(child));
                 row_map.push(RenderRow::Event(ev_idx));
             }

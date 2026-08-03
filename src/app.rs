@@ -56,9 +56,40 @@ pub struct GroupKey {
     pub event_type: EventType,
 }
 
+impl Default for GroupKey {
+    fn default() -> Self {
+        Self {
+            severity: Severity::Low,
+            pid: 0,
+            event_type: EventType::AcceptEvent,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
+pub struct Group {
+    pub id: usize,
+    pub key: GroupKey,
+    pub start: usize,
+    pub end: usize,
+    pub count: usize,
+}
+
+impl Default for Group {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            key: GroupKey::default(),
+            start: 0,
+            end: 0,
+            count: 0,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum RenderRow {
-    Group(GroupKey),
+    Group(usize),
     Event(usize),
 }
 
@@ -122,8 +153,10 @@ pub struct App {
     pub total_batches: usize,
     pub follow_tail: bool,
     pub grouped: BTreeMap<GroupKey, Vec<usize>>,
-    pub expanded_groups: std::collections::HashSet<GroupKey>,
+    pub expanded_groups: std::collections::HashSet<usize>,
     pub row_map: Vec<RenderRow>,
+    pub groups: Vec<Group>,
+    pub next_group_id: usize,
 }
 
 #[derive(Debug)]
@@ -183,6 +216,8 @@ impl Default for App {
             grouped: BTreeMap::new(),
             expanded_groups: HashSet::new(),
             row_map: Vec::new(),
+            groups: Vec::new(),
+            next_group_id: 0,
         }
     }
 }
@@ -252,15 +287,34 @@ impl App {
         Self::default()
     }
 
-    fn index_event(&mut self, idx: usize) {
+    pub fn index_event(&mut self, idx: usize) {
         let event = &mut self.events[idx];
+
         let key = GroupKey {
             severity: event.severity,
             pid: event.event.pid(),
             event_type: event.event.event_type(),
         };
 
-        self.grouped.entry(key).or_default().push(idx);
+        let id = self.next_group_id;
+        self.next_group_id += 1;
+
+        match self.groups.last_mut() {
+            Some(last) if last.key == key => {
+                last.end = idx;
+                last.count += 1;
+            }
+
+            _ => {
+                self.groups.push(Group {
+                    id,
+                    key,
+                    start: idx,
+                    end: idx,
+                    count: 1,
+                });
+            }
+        }
     }
 
     fn ensure_batches_loaded(&mut self, global_selected: usize) -> anyhow::Result<()> {
@@ -288,7 +342,7 @@ impl App {
     fn load_batch_range(&mut self, lo: usize, hi: usize) -> anyhow::Result<()> {
         self.events.clear();
         self.filtered_events.clear();
-        self.grouped.clear();
+        self.groups.clear();
 
         for b in lo..=hi {
             let batch_events = read_batch(b)?;
@@ -557,7 +611,7 @@ impl App {
                 self.view_mode = ViewMode::Live;
                 self.events.clear();
                 self.filtered_events.clear();
-                self.grouped.clear();
+                self.groups.clear();
                 self.view_port.window_start = 0;
                 self.stream_state.select(None);
                 self.selected_event = None;
