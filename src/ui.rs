@@ -1,7 +1,7 @@
 #![allow(unused)]
 use std::process::id;
 
-use crate::app::{App, FILTEREVENTS, Focus, RenderRow, UiEvent, ViewMode};
+use crate::app::{App, FILTEREVENTS, Focus, UiEvent, ViewMode};
 use crate::write::{BatchInfo, PER_BATCH_SIZE};
 use crate::*;
 use ratatui::Frame;
@@ -144,90 +144,51 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     let selected = app.stream_state.selected().unwrap_or(0);
 
     let mut items: Vec<ListItem> = Vec::new();
-    let mut row_map: Vec<RenderRow> = Vec::new();
 
-    for (group_idx, group) in app.groups.iter().enumerate() {
-        let is_expanded = app.expanded_groups.contains(&group.id);
-        let arrow = if is_expanded { "▾" } else { " ▸" };
-        let sev_col = sev_color(&group.key.severity);
+    for (i, &ev_idx) in app.filtered_events.iter().enumerate() {
+        let event: &UiEvent = &app.events[ev_idx];
+        let sev = &event.severity;
+        let is_sel = selected == i;
+        let sev_col = sev_color(&sev);
+        let ts = &event.timestamp;
+        let pid = event.event.pid();
+        let kind = &event.kind;
+        let detail = &event.detail;
+        let border_char = if is_sel { "▶" } else { " " };
+        let bg = if is_sel { C_BG3 } else { C_BG };
 
-        let first_ts = app.events[group.start].timestamp.as_str();
-
-        let header = Line::from(vec![
+        let line = Line::from(vec![
+            Span::styled(border_char, Style::default().fg(sev_col).bg(bg)),
             Span::styled(
-                format!("{arrow:<TREE_W$}"),
-                Style::default().fg(C_MUTED).bg(C_BG),
+                format!(" {:<TIME_W$}", &ts[..11.min(ts.len())]),
+                Style::default().fg(C_MUTED).bg(bg),
             ),
             Span::styled(
-                format!("{:<TIME_W$} ", &first_ts[..11.min(first_ts.len())]),
-                Style::default().fg(C_MUTED).bg(C_BG),
-            ),
-            Span::styled(
-                format!("{:<SEV_W$} ", group.key.severity.label()),
+                format!(" {:<SEV_W$}", sev.label()),
                 Style::default()
                     .fg(sev_col)
-                    .bg(C_BG)
+                    .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{:<PID_W$} ", group.key.pid),
-                Style::default().fg(C_TEXT).bg(C_BG),
+                format!(" {:<PID_W$}", pid),
+                Style::default().fg(C_TEXT).bg(bg),
             ),
             Span::styled(
-                format!("{:<TYPE_W$}", format!("{:?}", group.key.event_type)),
-                Style::default().fg(C_PURPLE).bg(C_BG),
+                format!(" {:<TYPE_W$}", kind.trim()),
+                Style::default().fg(C_PURPLE).bg(bg),
             ),
-            Span::styled(
-                format!("({} events)", group.count),
-                Style::default().fg(C_MUTED).bg(C_BG),
-            ),
+            Span::styled(detail, Style::default().fg(detail_color(event)).bg(bg)),
         ]);
 
-        items.push(ListItem::new(header));
-        row_map.push(RenderRow::Group(group.id));
-
-        if is_expanded {
-            for ev_idx in group.start..=group.end {
-                let event = &app.events[ev_idx];
-                let ts = &event.timestamp;
-                let detail = &event.detail;
-
-                let is_last = ev_idx == group.end;
-                let ts_len = first_ts.len() / 2;
-
-                let branch = if is_last {
-                    format!("{:<ts_len$}└─ ", "")
-                } else {
-                    format!("{:<ts_len$}├─ ", "")
-                };
-
-                let child = Line::from(vec![
-                    Span::styled(
-                        format!("{branch:<TREE_W$}"),
-                        Style::default().fg(C_MUTED).bg(C_BG),
-                    ),
-                    Span::styled(
-                        format!("{:<TIME_W$} ", &ts[..11.min(ts.len())]),
-                        Style::default().fg(C_MUTED).bg(C_BG),
-                    ),
-                    Span::styled(
-                        detail.to_string(),
-                        Style::default().fg(detail_color(event)).bg(C_BG),
-                    ),
-                ]);
-
-                items.push(ListItem::new(child));
-                row_map.push(RenderRow::Event(ev_idx));
-            }
-        }
+        items.push(ListItem::new(line));
     }
 
-    app.row_map = row_map;
+    items.push(ListItem::new(Line::from("")));
 
-    let list = List::new(items)
-        .style(Style::default().bg(C_BG))
-        .highlight_style(Style::default().bg(C_BG3));
+    let list = List::new(items).style(Style::default().bg(C_BG));
     frame.render_stateful_widget(list, list_area, &mut app.stream_state);
+
     render_scrollbar(frame, inner, selected, total);
 }
 

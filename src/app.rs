@@ -49,50 +49,6 @@ pub enum ViewMode {
     History,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
-pub struct GroupKey {
-    pub severity: Severity,
-    pub pid: u32,
-    pub event_type: EventType,
-}
-
-impl Default for GroupKey {
-    fn default() -> Self {
-        Self {
-            severity: Severity::Low,
-            pid: 0,
-            event_type: EventType::AcceptEvent,
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
-pub struct Group {
-    pub id: usize,
-    pub key: GroupKey,
-    pub start: usize,
-    pub end: usize,
-    pub count: usize,
-}
-
-impl Default for Group {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            key: GroupKey::default(),
-            start: 0,
-            end: 0,
-            count: 0,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum RenderRow {
-    Group(usize),
-    Event(usize),
-}
-
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
 pub struct UiEvent {
     pub event: AppEvent,
@@ -152,11 +108,6 @@ pub struct App {
     pub loaded_range: (usize, usize),
     pub total_batches: usize,
     pub follow_tail: bool,
-    pub grouped: BTreeMap<GroupKey, Vec<usize>>,
-    pub expanded_groups: std::collections::HashSet<usize>,
-    pub row_map: Vec<RenderRow>,
-    pub groups: Vec<Group>,
-    pub next_group_id: usize,
 }
 
 #[derive(Debug)]
@@ -213,11 +164,6 @@ impl Default for App {
             total_batches: 0,
             follow_tail: false,
             sev_area: Rect::default(),
-            grouped: BTreeMap::new(),
-            expanded_groups: HashSet::new(),
-            row_map: Vec::new(),
-            groups: Vec::new(),
-            next_group_id: 0,
         }
     }
 }
@@ -267,7 +213,7 @@ fn row_at_stream(app: &App, col: u16, row: u16) -> Option<usize> {
     }
     let rel = (row - area.y) as usize;
     let idx = rel + app.stream_state.offset() - 1;
-    (idx < app.row_map.len()).then_some(idx)
+    (idx < app.filtered_events.len()).then_some(idx)
 }
 
 pub const FILTEREVENTS: [&str; 9] = [
@@ -285,36 +231,6 @@ pub const FILTEREVENTS: [&str; 9] = [
 impl App {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn index_event(&mut self, idx: usize) {
-        let event = &mut self.events[idx];
-
-        let key = GroupKey {
-            severity: event.severity,
-            pid: event.event.pid(),
-            event_type: event.event.event_type(),
-        };
-
-        let id = self.next_group_id;
-        self.next_group_id += 1;
-
-        match self.groups.last_mut() {
-            Some(last) if last.key == key => {
-                last.end = idx;
-                last.count += 1;
-            }
-
-            _ => {
-                self.groups.push(Group {
-                    id,
-                    key,
-                    start: idx,
-                    end: idx,
-                    count: 1,
-                });
-            }
-        }
     }
 
     fn ensure_batches_loaded(&mut self, global_selected: usize) -> anyhow::Result<()> {
@@ -342,7 +258,6 @@ impl App {
     fn load_batch_range(&mut self, lo: usize, hi: usize) -> anyhow::Result<()> {
         self.events.clear();
         self.filtered_events.clear();
-        self.groups.clear();
 
         for b in lo..=hi {
             let batch_events = read_batch(b)?;
@@ -353,7 +268,6 @@ impl App {
                     || match_query(&self.events[idx], &self.search_query)
                 {
                     self.filtered_events.push(idx);
-                    self.index_event(idx);
                 }
             }
         }
@@ -402,7 +316,6 @@ impl App {
                         || match_query(&self.events[idx], &self.search_query)
                     {
                         self.filtered_events.push(idx);
-                        self.index_event(idx);
                     }
                 }
 
@@ -472,20 +385,6 @@ impl App {
                 }
                 if let Some(idx) = row_at_stream(self, mouse.column, mouse.row) {
                     self.stream_state.select(Some(idx));
-                    match self.row_map.get(idx) {
-                        Some(RenderRow::Group(key)) => {
-                            let key = key.clone();
-                            if self.expanded_groups.contains(&key) {
-                                self.expanded_groups.remove(&key);
-                            } else {
-                                self.expanded_groups.insert(key);
-                            }
-                        }
-                        Some(RenderRow::Event(ev_idx)) => {
-                            self.selected_event = self.events.get(*ev_idx).cloned();
-                        }
-                        None => {}
-                    }
                 }
             }
             MouseEventKind::ScrollDown => self.scroll_down(),
@@ -535,20 +434,6 @@ impl App {
             }
             KeyCode::Enter => {
                 let idx = self.stream_state.selected().unwrap_or(0);
-                match self.row_map.get(idx) {
-                    Some(RenderRow::Group(key)) => {
-                        let key = key.clone();
-                        if self.expanded_groups.contains(&key) {
-                            self.expanded_groups.remove(&key);
-                        } else {
-                            self.expanded_groups.insert(key);
-                        }
-                    }
-                    Some(RenderRow::Event(ev_idx)) => {
-                        self.selected_event = self.events.get(*ev_idx).cloned();
-                    }
-                    None => {}
-                }
             }
             KeyCode::Char('g') => {
                 if self.g_char {
@@ -572,29 +457,25 @@ impl App {
 
             KeyCode::Char('G') => {
                 if !self.pause {
-                    tracing::info!("setting follow_tail true");
                     self.follow_tail = true;
                 }
-
-                if let Some(last_group_idx) = self
-                    .row_map
-                    .iter()
-                    .rposition(|r| matches!(r, RenderRow::Group(_)))
-                {
-                    self.stream_state.select(Some(last_group_idx));
-                    self.get_selected();
-                }
-
                 if self.total_batches == 0 {
                     return;
                 }
-
                 let last_global = self.total_batches * PER_BATCH_SIZE - 1;
+
                 if self.view_mode == ViewMode::History {
                     if let Err(e) = self.ensure_batches_loaded(last_global) {
                         tracing::error!("failed to load batch: {e}");
                         return;
                     }
+                }
+
+                if !self.filtered_events.is_empty() {
+                    self.view_port.window_start = self.loaded_range.0 * PER_BATCH_SIZE;
+                    self.stream_state
+                        .select(Some(self.filtered_events.len() - 1));
+                    self.get_selected();
                 }
             }
 
@@ -611,7 +492,6 @@ impl App {
                 self.view_mode = ViewMode::Live;
                 self.events.clear();
                 self.filtered_events.clear();
-                self.groups.clear();
                 self.view_port.window_start = 0;
                 self.stream_state.select(None);
                 self.selected_event = None;
@@ -742,10 +622,12 @@ impl App {
             self.selected_event = None;
             return;
         };
-        self.selected_event = match self.row_map.get(selected) {
-            Some(RenderRow::Event(idx)) => self.events.get(*idx).cloned(),
-            _ => None,
-        };
+
+        if let Some(&idx) = self.filtered_events.get(selected) {
+            self.selected_event = self.events.get(idx).cloned();
+        } else {
+            self.selected_event = None;
+        }
     }
 
     pub fn search_push(&mut self, c: char) {
@@ -763,10 +645,9 @@ impl App {
     }
 
     pub fn selected_event(&self) -> Option<&UiEvent> {
-        match self.row_map.get(self.stream_state.selected()?)? {
-            RenderRow::Event(idx) => self.events.get(*idx),
-            RenderRow::Group(_) => None,
-        }
+        self.filtered_events
+            .get(self.stream_state.selected().unwrap_or(0))
+            .and_then(|&idx| self.events.get(idx))
     }
 }
 
