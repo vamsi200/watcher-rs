@@ -23,15 +23,6 @@ pub fn get_exe(pid: u32) -> PathBuf {
     read_link(format!("/proc/{}/exe", pid)).unwrap_or_default()
 }
 
-// #[derive(
-//     Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-// )]
-// pub struct ProcessEvent {
-//     pub info: ProcessInfo,
-//     pub uid: u32,
-//     pub timestamp: u64,
-// }
-
 #[derive(
     Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
@@ -89,8 +80,8 @@ impl Severity {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
 pub enum EventType {
-    ExecStart,
-    ExecExit,
+    ProcessStart,
+    ProcessExit,
     FileOpen,
     FileClose,
     AcceptEvent,
@@ -100,108 +91,99 @@ pub enum EventType {
     Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
 pub enum AppEvent {
-    Exec(ProcessStartEvent),
-    ExecExit(ProcessExitEvent),
-    File(Classified<FileOpenEvent>),
+    ProcessStart(ProcessStartEvent),
+    ProcessExit(ProcessExitEvent),
+    FileOpen(Classified<FileOpenEvent>),
     FileClose(Classified<FileCloseEvent>),
-    Network(AcceptEvent),
-    // Process(ProcessEvent),
+    NetworkAccept(AcceptEvent),
 }
 
 impl AppEvent {
     pub fn event_type(&mut self) -> EventType {
         match self {
-            AppEvent::Exec(_) => EventType::ExecStart,
-            AppEvent::ExecExit(_) => EventType::ExecExit,
-            AppEvent::File(_) => EventType::FileOpen,
+            AppEvent::ProcessStart(_) => EventType::ProcessStart,
+            AppEvent::ProcessExit(_) => EventType::ProcessExit,
+            AppEvent::FileOpen(_) => EventType::FileOpen,
             AppEvent::FileClose(_) => EventType::FileClose,
-            AppEvent::Network(_) => EventType::AcceptEvent,
+            AppEvent::NetworkAccept(_) => EventType::AcceptEvent,
         }
     }
     pub fn matches_filter(&self, filter_idx: usize) -> (bool, &'static str) {
         let val = FILTEREVENTS[filter_idx];
         match val {
             "All" => (true, "All"),
-            "ExecStart" => (matches!(self, AppEvent::Exec(_)), "ExecStart"),
-            "ExecExit" => (matches!(self, AppEvent::ExecExit(_)), "ExecExit"),
-            "FileOpen" => (matches!(self, AppEvent::File(_)), "FileOpen"),
+            "FileOpen" => (matches!(self, AppEvent::FileOpen(_)), "FileOpen"),
             "FileClose" => (matches!(self, AppEvent::FileClose(_)), "FileClose"),
-            "Network" => (matches!(self, AppEvent::Network(_)), "Network"),
-            // "ProcessEvent" => matches!(self, AppEvent::Process(_)),
+            "NetworkAccept" => (matches!(self, AppEvent::NetworkAccept(_)), "NetworkAccept"),
+            "ProcessStart" => (matches!(self, AppEvent::ProcessStart(_)), "ProcessStart"),
+            "ProcessExit" => (matches!(self, AppEvent::ProcessExit(_)), "ProcessExit"),
             _ => (false, "None"),
         }
     }
 
     pub fn timestamp(&self) -> u64 {
         match self {
-            AppEvent::Exec(e) => e.header.timestamp_ns,
-            AppEvent::ExecExit(e) => e.header.timestamp_ns,
-            AppEvent::File(e) => e.event.header.timestamp_ns,
+            AppEvent::ProcessStart(e) => e.header.timestamp_ns,
+            AppEvent::ProcessExit(e) => e.header.timestamp_ns,
+            AppEvent::FileOpen(e) => e.event.header.timestamp_ns,
             AppEvent::FileClose(e) => e.event.header.timestamp_ns,
-            AppEvent::Network(e) => e.header.timestamp_ns,
-            // AppEvent::Process(e) => e.timestamp,
+            AppEvent::NetworkAccept(e) => e.header.timestamp_ns,
         }
     }
 
     pub fn pid(&self) -> u32 {
         match self {
-            AppEvent::Exec(e) => e.header.pid,
-            AppEvent::ExecExit(e) => e.header.pid,
-            AppEvent::File(e) => e.event.header.pid,
+            AppEvent::ProcessStart(e) => e.header.pid,
+            AppEvent::ProcessExit(e) => e.header.pid,
+            AppEvent::FileOpen(e) => e.event.header.pid,
             AppEvent::FileClose(e) => e.event.header.pid,
-            AppEvent::Network(e) => e.header.pid,
-            // AppEvent::Process(e) => e.info.pid,
+            AppEvent::NetworkAccept(e) => e.header.pid,
         }
     }
 
     pub fn kind_label(&self) -> &'static str {
         match self {
-            AppEvent::Exec(_) => "ExecEvent ",
-            AppEvent::ExecExit(_) => "ExecExit  ",
-            AppEvent::File(_) => "FileEvent ",
+            AppEvent::ProcessStart(_) => "ProcessStart ",
+            AppEvent::ProcessExit(_) => "ProcessExit  ",
+            AppEvent::FileOpen(_) => "FileOpen ",
             AppEvent::FileClose(_) => "FileClose ",
-            AppEvent::Network(_) => "NetEvent  ",
-            // AppEvent::Process(_) => "ProcEvent ",
+            AppEvent::NetworkAccept(_) => "NetworkAccept  ",
         }
     }
 
     // just for testing..
     pub fn severity(&self) -> Severity {
         match self {
-            AppEvent::File(e) => e.severity,
-            AppEvent::Network(e) => {
+            AppEvent::FileOpen(e) => e.severity,
+            AppEvent::NetworkAccept(e) => {
                 if e.endpoints.local_port > 30000 {
                     Severity::Medium
                 } else {
                     Severity::Low
                 }
             }
-            AppEvent::Exec(_) => Severity::Low,
-            AppEvent::ExecExit(_) => Severity::Info,
+            AppEvent::ProcessStart(_) => Severity::Low,
+            AppEvent::ProcessExit(_) => Severity::Info,
             AppEvent::FileClose(_) => Severity::Info,
-            // AppEvent::Process(_) => Severity::Info,
         }
     }
 
     pub fn detail(&self) -> String {
         match self {
-            AppEvent::Exec(e) => {
+            AppEvent::ProcessStart(e) => {
                 format!("exec {}", &e.filename)
             }
-            AppEvent::ExecExit(e) => {
+            AppEvent::ProcessExit(e) => {
                 format!("pid {} exited", e.header.pid)
             }
-            AppEvent::File(e) => e.event.file_path.clone(),
+            AppEvent::FileOpen(e) => e.event.file_path.clone(),
             AppEvent::FileClose(e) => {
                 format!("close {}", &e.event.header.comm)
             }
-            AppEvent::Network(e) => {
-                let addr = e.endpoints.remote_ip.to_string(); // TODO: recheck this
-
-                format!("→ {addr}")
-            } // AppEvent::Process(e) => {
-              //     format!("{} (ppid={})  {}", e.info.name, e.info.ppid, e.info.cmdline)
-              // }
+            AppEvent::NetworkAccept(e) => {
+                let addr = e.endpoints.remote_ip.to_string();
+                format!("→  {addr}")
+            }
         }
     }
 }

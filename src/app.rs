@@ -216,16 +216,13 @@ fn row_at_stream(app: &App, col: u16, row: u16) -> Option<usize> {
     (idx < app.filtered_events.len()).then_some(idx)
 }
 
-pub const FILTEREVENTS: [&str; 9] = [
+pub const FILTEREVENTS: [&str; 6] = [
     "All",
-    "ExecStart",
-    "ExecExit",
+    "ProcessStart",
+    "ProcessExit",
     "FileOpen",
     "FileClose",
-    "Network",
-    "Process",
-    "Privilege",
-    "Suspicious",
+    "NetworkAccept",
 ];
 
 impl App {

@@ -2,6 +2,7 @@
 use std::process::id;
 
 use crate::app::{App, FILTEREVENTS, Focus, UiEvent, ViewMode};
+use crate::helper::format_timestamp_ns;
 use crate::write::{BatchInfo, PER_BATCH_SIZE};
 use crate::*;
 use ratatui::Frame;
@@ -458,23 +459,34 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
     lines.push(Line::from(""));
 
     match &event.event {
-        AppEvent::Exec(e) => {
-            section(&mut lines, "PROCESS");
-            kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
+        AppEvent::ProcessStart(e) => {
+            section(&mut lines, "ProcessStart");
+            kv(&mut lines, "pid ", &e.header.pid.to_string(), C_TEXT);
+            kv(&mut lines, "ppid ", &e.header.ppid.to_string(), C_TEXT);
             kv(
                 &mut lines,
                 "uid",
                 &uid_label(e.header.uid),
                 uid_color(e.header.uid),
             );
-            kv(&mut lines, "file", &e.header.comm, C_PATH);
+            kv(&mut lines, "filename ", &e.filename, C_PATH);
+            kv(&mut lines, "comm ", &&e.header.comm, C_PATH);
         }
-        AppEvent::ExecExit(e) => {
-            section(&mut lines, "PROCESS");
+        AppEvent::ProcessExit(e) => {
+            let ok = e.exit_code >= 0;
+            section(&mut lines, "ProcessExit");
             kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
+            kv(&mut lines, "ppid ", &e.header.ppid.to_string(), C_TEXT);
+            kv(&mut lines, "comm ", &&e.header.comm, C_PATH);
+            kv(
+                &mut lines,
+                "retval",
+                &format!("{} ({})", e.exit_code, if ok { "ok" } else { "failed" }),
+                if ok { C_TEXT } else { C_RED },
+            );
         }
-        AppEvent::File(e) => {
-            section(&mut lines, "PROCESS");
+        AppEvent::FileOpen(e) => {
+            section(&mut lines, "FileOpen");
             kv(&mut lines, "name", &e.event.header.comm, C_TEXT);
             kv(&mut lines, "pid", &e.event.header.pid.to_string(), C_TEXT);
             kv(
@@ -527,63 +539,77 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
             kv(&mut lines, "inode", &e.event.inode.to_string(), C_MUTED);
         }
         AppEvent::FileClose(e) => {
-            section(&mut lines, "FILE");
-            kv(&mut lines, "pid", &e.event.header.pid.to_string(), C_TEXT);
-            kv(&mut lines, "path", &e.event.header.comm, C_PATH);
-        }
-        AppEvent::Network(e) => {
-            let addr = e.endpoints.remote_ip.to_string();
-            section(&mut lines, "PROCESS");
-            kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
-            lines.push(Line::from(""));
-            section(&mut lines, "NETWORK");
-            kv(&mut lines, "dst", &addr, C_BLUE);
+            section(&mut lines, "FileClose");
+            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
             kv(
                 &mut lines,
-                "port",
-                &e.endpoints.remote_port.to_string(),
-                port_color(e.endpoints.remote_port),
+                "ppid",
+                &e.event.header.ppid.to_string(),
+                C_MUTED,
             );
-            // kv(&mut lines, "family", &family_label(e.), C_MUTED);
-            // kv(&mut lines, "sockfd", &e.sockfd.to_string(), C_MUTED);
-        } // AppEvent::Process(e) => {
-          //     section(&mut lines, "PROCESS");
-          //     kv(&mut lines, "name", &e.info.name, C_TEXT);
-          //     kv(&mut lines, "pid", &e.info.pid.to_string(), C_TEXT);
-          //     kv(&mut lines, "ppid", &e.info.ppid.to_string(), C_MUTED);
-          //     kv(&mut lines, "uid", &uid_label(e.uid), uid_color(e.uid));
-          //     lines.push(Line::from(""));
-          //     section(&mut lines, "CMDLINE");
-          //     lines.push(Line::from(Span::styled(
-          //         e.info.cmdline.clone(),
-          //         Style::default().fg(C_PATH),
-          //     )));
-          // }
-          // AppEvent::Privilege(e) => {
-          //     section(&mut lines, "PROCESS");
-          //     kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
-          //     kv(&mut lines, "uid", &uid_label(e.uid), uid_color(e.uid));
-          //     lines.push(Line::from(""));
-          //     section(&mut lines, "PRIVILEGE");
-          //     kv(&mut lines, "binary", &e.binary, C_PATH);
-          //     kv(
-          //         &mut lines,
-          //         "setuid",
-          //         &e.is_setuid.to_string(),
-          //         if e.is_setuid { C_RED } else { C_MUTED },
-          //     );
-          // }
-          // AppEvent::Suspicious(e) => {
-          //     section(&mut lines, "SUSPICIOUS");
-          //     kv(&mut lines, "pid", &e.pid.to_string(), C_TEXT);
-          //     kv(&mut lines, "file", &e.file, C_PATH);
-          //     lines.push(Line::from(""));
-          //     section(&mut lines, "REASON");
-          //     lines.push(Line::from(Span::styled(
-          //         e.reason.clone(),
-          //         Style::default().fg(C_RED),
-          //     )));
-          // }
+            kv(
+                &mut lines,
+                "uid",
+                &uid_label(e.event.header.uid),
+                uid_color(e.event.header.uid),
+            );
+            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
+            kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
+            kv(
+                &mut lines,
+                "flags",
+                &format!("{:#010x}", e.event.flags),
+                C_MUTED,
+            );
+            let ok = e.event.retval >= 0;
+            kv(
+                &mut lines,
+                "retval",
+                &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
+                if ok { C_TEXT } else { C_RED },
+            );
+            kv(
+                &mut lines,
+                "mode",
+                &format!("{:?}", e.event.file_type),
+                C_MUTED,
+            );
+        }
+        AppEvent::NetworkAccept(e) => {
+            section(&mut lines, "Accept");
+
+            kv(&mut lines, "command", &e.header.comm, C_GREEN);
+            kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
+            kv(&mut lines, "tid", &e.header.tid.to_string(), C_TEXT);
+            kv(&mut lines, "ppid", &e.header.ppid.to_string(), C_TEXT);
+            kv(&mut lines, "uid", &e.header.uid.to_string(), C_TEXT);
+            kv(&mut lines, "gid", &e.header.gid.to_string(), C_TEXT);
+
+            lines.push(Line::from(""));
+
+            section(&mut lines, "NETWORK ");
+
+            let proto = match e.protocol {
+                Protocol::Tcp => "TCP ",
+                Protocol::Udp => "UDP ",
+            };
+
+            kv(&mut lines, "protocol ", proto, C_BLUE);
+
+            kv(
+                &mut lines,
+                "source ",
+                &format!("{}:{}", e.endpoints.local_ip, e.endpoints.local_port),
+                C_GREEN,
+            );
+
+            kv(
+                &mut lines,
+                "destination ",
+                &format!("{}:{}", e.endpoints.remote_ip, e.endpoints.remote_port),
+                C_BLUE,
+            );
+        }
     }
 
     Text::from(lines)

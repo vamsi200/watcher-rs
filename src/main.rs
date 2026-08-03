@@ -35,8 +35,6 @@ use watcher_rs::{
     helper::format_timestamp_ns,
 };
 
-// use watcher_rs_common::*;
-
 use std::{path::PathBuf, sync::LazyLock};
 
 use color_eyre::eyre::{Context, Result};
@@ -154,13 +152,13 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
             Some(event) = process_events.next() => {
                 match event {
                     ProcessEvent::Start(e) => {
-                        if tx.send(AppEvent::Exec(e)).await.is_err() {
+                        if tx.send(AppEvent::ProcessStart(e)).await.is_err() {
                             return Ok(());
                         }
                     }
 
                     ProcessEvent::Exit(e) => {
-                        if tx.send(AppEvent::ExecExit(e)).await.is_err() {
+                        if tx.send(AppEvent::ProcessExit(e)).await.is_err() {
                             return Ok(());
                         }
                     }
@@ -171,43 +169,36 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
 
             Some(event) = file_events.next() => {
 
-                // if let Some(inode) = event.inode(){
-                //     let filter_key = FileKey {
-                //         pid: event.process().pid,
-                //         tid: event.process().tid,
-                //         key: KeyVal::Inode(inode),
-                //     };
-                //
-                //     if file_event_filter.should_drop(&event, filter_key) {
-                //         continue;
-                //     }
-                //
-                // } else {
-                //     if let Some(path) = event.file_path() {
-                //         let filter_key = FileKey {
-                //             pid: event.process().pid,
-                //             tid: event.process().tid,
-                //             key: KeyVal::Path(path.to_owned()),
-                //         };
-                //
-                //         if file_event_filter.should_drop(&event, filter_key) {
-                //                 continue;
-                //         }
-                //     }
-                // }
+                if let Some(inode) = event.inode(){
+                    let filter_key = FileKey {
+                        pid: event.process().pid,
+                        tid: event.process().tid,
+                        key: KeyVal::Inode(inode),
+                    };
+
+                    if file_event_filter.should_drop(&event, filter_key) {
+                        continue;
+                    }
+
+                } else {
+                    if let Some(path) = event.file_path() {
+                        let filter_key = FileKey {
+                            pid: event.process().pid,
+                            tid: event.process().tid,
+                            key: KeyVal::Path(path.to_owned()),
+                        };
+
+                        if file_event_filter.should_drop(&event, filter_key) {
+                                continue;
+                        }
+                    }
+                }
 
                 match event {
                     FileEvent::Open(e) => {
                         let event = file_classifer.classify_open(e);
-                        // if event.severity == Severity::Low {
-                        //     continue;
-                        // }
 
-                        // if event.event.file_path == "/etc/passwd" {
-                        // tracing::debug!("<< {}", event.event.file_path);
-                        // }
-
-                        if tx.send(AppEvent::File(event)).await.is_err() {
+                        if tx.send(AppEvent::FileOpen(event)).await.is_err() {
                             return Ok(());
                         }
                     }
@@ -227,7 +218,7 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
             Some(event) = network_events.next() => {
                 match event {
                     NetworkEvent::Accept(e) => {
-                        if tx.send(AppEvent::Network(e)).await.is_err() {
+                        if tx.send(AppEvent::NetworkAccept(e)).await.is_err() {
                             return Ok(());
                         }
                     }

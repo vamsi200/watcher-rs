@@ -85,32 +85,6 @@ pub struct Aggregate {
     count: u64,
 }
 
-// TODO: Test and refine the approach
-fn detect_privileged_exec(events: &[ProcessStartEvent]) -> Vec<PrivilegeEvent> {
-    let mut p_events = Vec::new();
-    for ev in events {
-        let file_name = std::fs::read_link(format!("/proc/{}/exe", ev.header.pid))
-            .unwrap_or_else(|_| PathBuf::from("unknown")); // find some other way to find the
-        // binary
-
-        let is_setuid = match std::fs::metadata(&file_name) {
-            Ok(meta) => (meta.permissions().mode() & 0o4000) != 0,
-            Err(_) => false,
-        };
-
-        if is_setuid || ev.header.uid == 0 {
-            p_events.push(PrivilegeEvent {
-                pid: ev.header.pid,
-                uid: ev.header.uid,
-                binary: file_name.to_str().unwrap().to_owned(),
-                is_setuid,
-                timestamp: ev.header.timestamp_ns,
-            });
-        }
-    }
-    p_events
-}
-
 const HIGH_FREQ_THRESHOLD: usize = 50;
 const MED_FREQ_THRESHOLD: usize = 20;
 const HIGH_CONN_THRESHOLD: usize = 100;
@@ -259,15 +233,20 @@ pub struct Classified<T> {
 
 type ClassifiedFileOpenEvent = Classified<FileOpenEvent>;
 type ClassifiedFileCloseEvent = Classified<FileCloseEvent>;
+type ClassifiedProcessStartEvent = Classified<ProcessStartEvent>;
 
-pub trait FileRule: Send + Sync {
+//TODO: Refactor later to just match enum
+pub trait Rule: Send + Sync {
     fn name(&self) -> &'static str;
     fn check_open(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity>;
     fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity>;
+    fn check_process_start(&self, event: &ProcessStartEvent, ctx: &RuleContext)
+    -> Option<Severity>;
+    fn check_process_exit(&self, event: &ProcessExitEvent, ctx: &RuleContext) -> Option<Severity>;
 }
 
 pub struct RuleEngine {
-    pub rules: Vec<Box<dyn FileRule>>,
+    pub rules: Vec<Box<dyn Rule>>,
 }
 
 impl RuleEngine {
@@ -277,19 +256,19 @@ impl RuleEngine {
         ctx: RuleContext,
     ) -> Classified<FileOpenEvent> {
         let mut severity = Severity::Low;
-        let mut matched = Vec::new();
+        let mut matched_rules = Vec::new();
 
         for rule in &self.rules {
             if let Some(sev) = rule.check_open(&event, &ctx) {
                 severity = severity.max(sev);
-                matched.push(rule.name().to_owned());
+                matched_rules.push(rule.name().to_owned());
             }
         }
 
         Classified {
             event,
             severity,
-            matched_rules: matched,
+            matched_rules,
         }
     }
 
@@ -299,19 +278,41 @@ impl RuleEngine {
         ctx: RuleContext,
     ) -> Classified<FileCloseEvent> {
         let mut severity = Severity::Low;
-        let mut matched = Vec::new();
+        let mut matched_rules = Vec::new();
 
         for rule in &self.rules {
             if let Some(sev) = rule.check_close(&event, &ctx) {
                 severity = severity.max(sev);
-                matched.push(rule.name().to_owned());
+                matched_rules.push(rule.name().to_owned());
             }
         }
 
         Classified {
             event,
             severity,
-            matched_rules: matched,
+            matched_rules,
+        }
+    }
+
+    pub fn classify_process_start(
+        &self,
+        event: ProcessStartEvent,
+        ctx: RuleContext,
+    ) -> Classified<ProcessStartEvent> {
+        let mut severity = Severity::Low;
+        let mut matched_rules = Vec::new();
+
+        for rule in &self.rules {
+            if let Some(sev) = rule.check_process_start(&event, &ctx) {
+                severity = severity.max(sev);
+                matched_rules.push(rule.name().to_owned());
+            }
+        }
+
+        Classified {
+            event,
+            severity,
+            matched_rules,
         }
     }
 }
@@ -416,7 +417,7 @@ impl SensitivePathRule {
     }
 }
 
-impl FileRule for SensitivePathRule {
+impl Rule for SensitivePathRule {
     fn name(&self) -> &'static str {
         "SensitivePath"
     }
@@ -427,6 +428,18 @@ impl FileRule for SensitivePathRule {
 
     fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
         self.check(event, ctx)
+    }
+
+    fn check_process_start(
+        &self,
+        event: &ProcessStartEvent,
+        ctx: &RuleContext,
+    ) -> Option<Severity> {
+        None
+    }
+
+    fn check_process_exit(&self, event: &ProcessExitEvent, ctx: &RuleContext) -> Option<Severity> {
+        None
     }
 }
 
@@ -448,7 +461,7 @@ impl FlagRule {
     }
 }
 
-impl FileRule for FlagRule {
+impl Rule for FlagRule {
     fn name(&self) -> &'static str {
         "SensitiveFlag"
     }
@@ -459,6 +472,18 @@ impl FileRule for FlagRule {
 
     fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
         self.check(event, ctx)
+    }
+
+    fn check_process_exit(&self, event: &ProcessExitEvent, ctx: &RuleContext) -> Option<Severity> {
+        None
+    }
+
+    fn check_process_start(
+        &self,
+        event: &ProcessStartEvent,
+        ctx: &RuleContext,
+    ) -> Option<Severity> {
+        None
     }
 }
 
@@ -477,7 +502,7 @@ impl RootWriteRule {
     }
 }
 
-impl FileRule for RootWriteRule {
+impl Rule for RootWriteRule {
     fn name(&self) -> &'static str {
         "RootWrite"
     }
@@ -488,6 +513,18 @@ impl FileRule for RootWriteRule {
 
     fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
         self.check(event, ctx)
+    }
+
+    fn check_process_start(
+        &self,
+        event: &ProcessStartEvent,
+        ctx: &RuleContext,
+    ) -> Option<Severity> {
+        None
+    }
+
+    fn check_process_exit(&self, event: &ProcessExitEvent, ctx: &RuleContext) -> Option<Severity> {
+        None
     }
 }
 
@@ -510,7 +547,7 @@ impl TempExecutableRule {
     }
 }
 
-impl FileRule for TempExecutableRule {
+impl Rule for TempExecutableRule {
     fn name(&self) -> &'static str {
         "TempExecutable"
     }
@@ -521,6 +558,18 @@ impl FileRule for TempExecutableRule {
 
     fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
         self.check(event, ctx)
+    }
+
+    fn check_process_start(
+        &self,
+        event: &ProcessStartEvent,
+        ctx: &RuleContext,
+    ) -> Option<Severity> {
+        None
+    }
+
+    fn check_process_exit(&self, event: &ProcessExitEvent, ctx: &RuleContext) -> Option<Severity> {
+        None
     }
 }
 
@@ -559,110 +608,6 @@ impl FileClassifier {
 
         self.engine.classify_close(event, ctx)
     }
-}
-
-// TODO: Test and refine the approach and reduce allocations
-pub fn detect_suspicious_file_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<SuspiciousEvent> {
-    let mut suspicious = Vec::new();
-    let mut pid_access_counts: HashMap<u32, (usize, u64)> = HashMap::new();
-
-    if let Some(event) = events.pop_front() {
-        let filename = event.file_name();
-
-        if let Some(matched_path) = SENSITIVE_PATHS.iter().find(|&&p| filename.starts_with(p)) {
-            let severity = if matches!(*matched_path, "/etc/shadow" | "/.ssh/" | "/etc/sudoers") {
-                Severity::High
-            } else {
-                Severity::Medium
-            };
-
-            suspicious.push(SuspiciousEvent {
-                pid: event.header.pid,
-                reason: format!("Access to sensitive path: {}", filename),
-                file: filename.to_string(),
-                severity,
-                timestamp: event.header.timestamp_ns,
-            });
-        }
-
-        if event.header.uid != 0 && is_root_only_path(&filename) {
-            suspicious.push(SuspiciousEvent {
-                pid: event.header.pid,
-                reason: format!(
-                    "Non-root UID {} accessing privileged path: {}",
-                    event.header.uid, filename
-                ),
-                file: filename.to_string(),
-                severity: Severity::High,
-                timestamp: event.header.timestamp_ns,
-            });
-        }
-
-        for &(flag_combo, description) in SUSPICIOUS_FLAGS {
-            if event.flags as i32 & flag_combo == flag_combo {
-                //TODO: fix this
-                suspicious.push(SuspiciousEvent {
-                    pid: event.header.pid,
-                    reason: format!("Suspicious open flags on '{}': {}", filename, description),
-                    file: filename.to_string(),
-                    severity: Severity::Medium,
-                    timestamp: event.header.timestamp_ns,
-                });
-                break;
-            }
-        }
-
-        let entry = pid_access_counts
-            .entry(event.header.pid)
-            .or_insert((0, event.header.timestamp_ns));
-
-        if event.header.timestamp_ns - entry.1 <= TIME_WINDOW_NS {
-            entry.0 += 1;
-        } else {
-            *entry = (1, event.header.timestamp_ns);
-        }
-
-        let access_count = entry.0;
-        if access_count == HIGH_FREQ_THRESHOLD {
-            suspicious.push(SuspiciousEvent {
-                pid: event.header.pid,
-                reason: format!(
-                    "High-frequency file access: {} accesses in 1s window",
-                    access_count
-                ),
-                file: filename.to_string(),
-                severity: Severity::High,
-                timestamp: event.header.timestamp_ns,
-            });
-        } else if access_count == MED_FREQ_THRESHOLD {
-            suspicious.push(SuspiciousEvent {
-                pid: event.header.pid,
-                reason: format!(
-                    "Elevated file access rate: {} accesses in 1s window",
-                    access_count
-                ),
-                file: filename.to_string(),
-                severity: Severity::Medium,
-                timestamp: event.header.timestamp_ns,
-            });
-        }
-
-        // if event.dir_fd != libc::AT_FDCWD && event.dir_fd < 0 {
-        //     suspicious.push(SuspiciousEvent {
-        //         pid: event.pid,
-        //         reason: format!("Invalid dir_fd {} used in openat syscall", event.dir_fd),
-        //         file: filename,
-        //         severity: Severity::Low,
-        //         timestamp: event.timestamp,
-        //     });
-        // }
-    }
-
-    suspicious.dedup_by(|a, b| {
-        a.pid == b.pid && a.reason == b.reason && a.timestamp.abs_diff(b.timestamp) < TIME_WINDOW_NS
-    });
-
-    suspicious
 }
 
 // TODO: Test and refine the approach

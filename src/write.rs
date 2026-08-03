@@ -133,7 +133,7 @@ fn test_write() {
         comm: String::new(),
     };
 
-    events.push(AppEvent::Exec(ProcessStartEvent {
+    events.push(AppEvent::ProcessStart(ProcessStartEvent {
         header: event_header,
         filename: String::new(),
     }));
@@ -148,7 +148,7 @@ fn test_write() {
         comm: String::new(),
     };
 
-    events.push(AppEvent::Exec(ProcessStartEvent {
+    events.push(AppEvent::ProcessStart(ProcessStartEvent {
         header: event_header_2,
         filename: String::new(),
     }));
