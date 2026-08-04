@@ -1,5 +1,6 @@
 pub mod app;
 pub mod detection;
+pub mod gen_db;
 pub mod helper;
 pub mod parser;
 pub mod ui;
@@ -85,6 +86,7 @@ pub enum EventType {
     FileOpen,
     FileClose,
     AcceptEvent,
+    ConnectEvent,
 }
 
 #[derive(
@@ -95,7 +97,8 @@ pub enum AppEvent {
     ProcessExit(ProcessExitEvent),
     FileOpen(Classified<FileOpenEvent>),
     FileClose(Classified<FileCloseEvent>),
-    NetworkAccept(AcceptEvent),
+    NetworkAccept(Classified<AcceptEvent>),
+    NetworkConnect(Classified<ConnectEvent>),
 }
 
 impl AppEvent {
@@ -106,6 +109,7 @@ impl AppEvent {
             AppEvent::FileOpen(_) => EventType::FileOpen,
             AppEvent::FileClose(_) => EventType::FileClose,
             AppEvent::NetworkAccept(_) => EventType::AcceptEvent,
+            AppEvent::NetworkConnect(_) => EventType::ConnectEvent,
         }
     }
     pub fn matches_filter(&self, filter_idx: usize) -> (bool, &'static str) {
@@ -117,6 +121,10 @@ impl AppEvent {
             "NetworkAccept" => (matches!(self, AppEvent::NetworkAccept(_)), "NetworkAccept"),
             "ProcessStart" => (matches!(self, AppEvent::ProcessStart(_)), "ProcessStart"),
             "ProcessExit" => (matches!(self, AppEvent::ProcessExit(_)), "ProcessExit"),
+            "NetworkConnect" => (
+                matches!(self, AppEvent::NetworkConnect(_)),
+                "NetworkConnect",
+            ),
             _ => (false, "None"),
         }
     }
@@ -127,7 +135,8 @@ impl AppEvent {
             AppEvent::ProcessExit(e) => e.header.timestamp_ns,
             AppEvent::FileOpen(e) => e.event.header.timestamp_ns,
             AppEvent::FileClose(e) => e.event.header.timestamp_ns,
-            AppEvent::NetworkAccept(e) => e.header.timestamp_ns,
+            AppEvent::NetworkAccept(e) => e.event.header.timestamp_ns,
+            AppEvent::NetworkConnect(e) => e.event.header.timestamp_ns,
         }
     }
 
@@ -137,7 +146,8 @@ impl AppEvent {
             AppEvent::ProcessExit(e) => e.header.pid,
             AppEvent::FileOpen(e) => e.event.header.pid,
             AppEvent::FileClose(e) => e.event.header.pid,
-            AppEvent::NetworkAccept(e) => e.header.pid,
+            AppEvent::NetworkAccept(e) => e.event.header.pid,
+            AppEvent::NetworkConnect(e) => e.event.header.pid,
         }
     }
 
@@ -148,6 +158,7 @@ impl AppEvent {
             AppEvent::FileOpen(_) => "FileOpen ",
             AppEvent::FileClose(_) => "FileClose ",
             AppEvent::NetworkAccept(_) => "NetworkAccept  ",
+            AppEvent::NetworkConnect(_) => "NetworkConnect  ",
         }
     }
 
@@ -155,16 +166,11 @@ impl AppEvent {
     pub fn severity(&self) -> Severity {
         match self {
             AppEvent::FileOpen(e) => e.severity,
-            AppEvent::NetworkAccept(e) => {
-                if e.endpoints.local_port > 30000 {
-                    Severity::Medium
-                } else {
-                    Severity::Low
-                }
-            }
+            AppEvent::NetworkAccept(e) => e.severity,
             AppEvent::ProcessStart(_) => Severity::Low,
             AppEvent::ProcessExit(_) => Severity::Info,
             AppEvent::FileClose(_) => Severity::Info,
+            AppEvent::NetworkConnect(e) => e.severity,
         }
     }
 
@@ -181,7 +187,11 @@ impl AppEvent {
                 format!("close {}", &e.event.header.comm)
             }
             AppEvent::NetworkAccept(e) => {
-                let addr = e.endpoints.remote_ip.to_string();
+                let addr = e.event.endpoints.remote_ip.to_string();
+                format!("→  {addr}")
+            }
+            AppEvent::NetworkConnect(e) => {
+                let addr = e.event.endpoints.remote_ip.to_string();
                 format!("→  {addr}")
             }
         }

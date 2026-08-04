@@ -5,6 +5,8 @@ use crate::app::{App, FILTEREVENTS, Focus, UiEvent, ViewMode};
 use crate::helper::format_timestamp_ns;
 use crate::write::{BatchInfo, PER_BATCH_SIZE};
 use crate::*;
+use bpfx::EventHeader;
+use clap::builder::Str;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -74,7 +76,6 @@ const TIME_W: usize = 15;
 const SEV_W: usize = 10;
 const PID_W: usize = 17;
 const TYPE_W: usize = 20;
-const TREE_W: usize = 3;
 
 fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = if app.selected_tab == Focus::Stream {
@@ -117,13 +118,16 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
 
     app.stream_area = inner;
 
-    let line = Line::from(vec![Span::styled(
-        format!(
-            "{:<TREE_W$}{:<TIME_W$} {:<SEV_W$} {:<PID_W$} {:<TYPE_W$}",
-            "", "TIME", "SEV", "PID/PROC", "TYPE",
+    let line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            format!(
+                " {:<TIME_W$} {:<SEV_W$} {:<PID_W$} {:<TYPE_W$}DETAIL",
+                "TIME", "SEV", "PID/PROC", "TYPE",
+            ),
+            Style::default().fg(C_MUTED).bg(C_BG2),
         ),
-        Style::default().fg(C_MUTED).bg(C_BG2),
-    )]);
+    ]);
 
     frame.render_widget(
         Paragraph::new(line).style(Style::default().bg(C_BG2)),
@@ -155,7 +159,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         let pid = event.event.pid();
         let kind = &event.kind;
         let detail = &event.detail;
-        let border_char = if is_sel { "▶" } else { " " };
+        let border_char = if is_sel { "⯈" } else { " " };
         let bg = if is_sel { C_BG3 } else { C_BG };
 
         let line = Line::from(vec![
@@ -438,6 +442,48 @@ fn family_label(family: u16) -> &'static str {
     }
 }
 
+fn render_network(
+    lines: &mut Vec<Line<'static>>,
+    title: &'static str,
+    header: &EventHeader,
+    protocol: &Protocol,
+    endpoints: &SocketEndpoints,
+) {
+    section(lines, title);
+
+    kv(lines, "command", &header.comm, C_GREEN);
+    kv(lines, "pid", &header.pid.to_string(), C_TEXT);
+    kv(lines, "tid", &header.tid.to_string(), C_TEXT);
+    kv(lines, "ppid", &header.ppid.to_string(), C_TEXT);
+    kv(lines, "uid", &header.uid.to_string(), C_TEXT);
+    kv(lines, "gid", &header.gid.to_string(), C_TEXT);
+
+    lines.push(Line::from(""));
+
+    section(lines, "NETWORK");
+
+    let proto = match protocol {
+        Protocol::Tcp => "TCP",
+        Protocol::Udp => "UDP",
+    };
+
+    kv(lines, "protocol", proto, C_BLUE);
+
+    kv(
+        lines,
+        "source",
+        &format!("{}:{}", endpoints.local_ip, endpoints.local_port),
+        C_GREEN,
+    );
+
+    kv(
+        lines,
+        "destination",
+        &format!("{}:{}", endpoints.remote_ip, endpoints.remote_port),
+        C_BLUE,
+    );
+}
+
 fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -576,38 +622,22 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
             );
         }
         AppEvent::NetworkAccept(e) => {
-            section(&mut lines, "Accept");
-
-            kv(&mut lines, "command", &e.header.comm, C_GREEN);
-            kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
-            kv(&mut lines, "tid", &e.header.tid.to_string(), C_TEXT);
-            kv(&mut lines, "ppid", &e.header.ppid.to_string(), C_TEXT);
-            kv(&mut lines, "uid", &e.header.uid.to_string(), C_TEXT);
-            kv(&mut lines, "gid", &e.header.gid.to_string(), C_TEXT);
-
-            lines.push(Line::from(""));
-
-            section(&mut lines, "NETWORK ");
-
-            let proto = match e.protocol {
-                Protocol::Tcp => "TCP ",
-                Protocol::Udp => "UDP ",
-            };
-
-            kv(&mut lines, "protocol ", proto, C_BLUE);
-
-            kv(
+            render_network(
                 &mut lines,
-                "source ",
-                &format!("{}:{}", e.endpoints.local_ip, e.endpoints.local_port),
-                C_GREEN,
+                "Accept",
+                &e.event.header,
+                &e.event.protocol,
+                &e.event.endpoints,
             );
+        }
 
-            kv(
+        AppEvent::NetworkConnect(e) => {
+            render_network(
                 &mut lines,
-                "destination ",
-                &format!("{}:{}", e.endpoints.remote_ip, e.endpoints.remote_port),
-                C_BLUE,
+                "Connect",
+                &e.event.header,
+                &e.event.protocol,
+                &e.event.endpoints,
             );
         }
     }

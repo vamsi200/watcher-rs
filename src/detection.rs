@@ -1,4 +1,5 @@
 #![allow(unused)]
+use crate::gen_db::{ArchivedIpsumDb, IpsumDb};
 use crate::helper::{bytes_to_str, check_path, is_root_only_path, parse_addr};
 use crate::*;
 use crate::{PrivilegeEvent, Severity, helper::is_sensitive_path};
@@ -7,7 +8,10 @@ use bpfx::{FileEvent, process::ProcessStartEvent};
 use futures::lock::Mutex;
 use libc::O_TRUNC;
 use lru::LruCache;
+use rkyv::rancor::Error;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Read;
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::LazyLock;
@@ -16,6 +20,41 @@ use std::{
     fs::{self, File},
     path::{self, PathBuf},
 };
+
+macro_rules! match_event {
+    ($($variant:ident), + $(,)?) => {
+        fn check(&self, event: Event, ctx: &RuleContext) -> Option<Severity> {
+            match event {
+                $(
+                    Event::$variant(e) => self.check(e, ctx),
+                )+
+                _ => None,
+            }
+        }
+    };
+}
+
+macro_rules! classify {
+    ($fn_name:ident, $variant:ident, $event_ty:ty) => {
+        pub fn $fn_name(&self, event: $event_ty, ctx: RuleContext) -> Classified<$event_ty> {
+            let mut severity = Severity::Low;
+            let mut matched_rules = Vec::new();
+
+            for rule in &self.rules {
+                if let Some(sev) = rule.check(Event::$variant(&event), &ctx) {
+                    severity = severity.max(sev);
+                    matched_rules.push(rule.name().to_owned());
+                }
+            }
+
+            Classified {
+                event,
+                severity,
+                matched_rules,
+            }
+        }
+    };
+}
 
 pub struct FileEventFilter {
     filter: LruCache<FileKey, Aggregate>,
@@ -220,6 +259,7 @@ const MED_READ_THRESHOLD: usize = 80;
 
 pub struct RuleContext<'a> {
     pub process_cache: &'a HashMap<u32, ProcessInfo>,
+    pub ipsum_bytes: Option<&'a [u8]>,
 }
 
 #[derive(
@@ -235,14 +275,18 @@ type ClassifiedFileOpenEvent = Classified<FileOpenEvent>;
 type ClassifiedFileCloseEvent = Classified<FileCloseEvent>;
 type ClassifiedProcessStartEvent = Classified<ProcessStartEvent>;
 
-//TODO: Refactor later to just match enum
+pub enum Event<'a> {
+    FileOpen(&'a FileOpenEvent),
+    FileClose(&'a FileCloseEvent),
+    ProcessStart(&'a ProcessStartEvent),
+    ProcessExit(&'a ProcessExitEvent),
+    Accept(&'a AcceptEvent),
+    Connect(&'a ConnectEvent),
+}
+
 pub trait Rule: Send + Sync {
     fn name(&self) -> &'static str;
-    fn check_open(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity>;
-    fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity>;
-    fn check_process_start(&self, event: &ProcessStartEvent, ctx: &RuleContext)
-    -> Option<Severity>;
-    fn check_process_exit(&self, event: &ProcessExitEvent, ctx: &RuleContext) -> Option<Severity>;
+    fn check(&self, event: Event, ctx: &RuleContext) -> Option<Severity>;
 }
 
 pub struct RuleEngine {
@@ -250,71 +294,11 @@ pub struct RuleEngine {
 }
 
 impl RuleEngine {
-    pub fn classify_open(
-        &self,
-        event: FileOpenEvent,
-        ctx: RuleContext,
-    ) -> Classified<FileOpenEvent> {
-        let mut severity = Severity::Low;
-        let mut matched_rules = Vec::new();
-
-        for rule in &self.rules {
-            if let Some(sev) = rule.check_open(&event, &ctx) {
-                severity = severity.max(sev);
-                matched_rules.push(rule.name().to_owned());
-            }
-        }
-
-        Classified {
-            event,
-            severity,
-            matched_rules,
-        }
-    }
-
-    pub fn classify_close(
-        &self,
-        event: FileCloseEvent,
-        ctx: RuleContext,
-    ) -> Classified<FileCloseEvent> {
-        let mut severity = Severity::Low;
-        let mut matched_rules = Vec::new();
-
-        for rule in &self.rules {
-            if let Some(sev) = rule.check_close(&event, &ctx) {
-                severity = severity.max(sev);
-                matched_rules.push(rule.name().to_owned());
-            }
-        }
-
-        Classified {
-            event,
-            severity,
-            matched_rules,
-        }
-    }
-
-    pub fn classify_process_start(
-        &self,
-        event: ProcessStartEvent,
-        ctx: RuleContext,
-    ) -> Classified<ProcessStartEvent> {
-        let mut severity = Severity::Low;
-        let mut matched_rules = Vec::new();
-
-        for rule in &self.rules {
-            if let Some(sev) = rule.check_process_start(&event, &ctx) {
-                severity = severity.max(sev);
-                matched_rules.push(rule.name().to_owned());
-            }
-        }
-
-        Classified {
-            event,
-            severity,
-            matched_rules,
-        }
-    }
+    classify!(classify_open, FileOpen, FileOpenEvent);
+    classify!(classify_close, FileClose, FileCloseEvent);
+    classify!(classify_process_start, ProcessStart, ProcessStartEvent);
+    classify!(classify_accept, Accept, AcceptEvent);
+    classify!(classify_connect, Connect, ConnectEvent);
 }
 
 trait FileEventCommon {
@@ -323,9 +307,9 @@ trait FileEventCommon {
     fn file_type(&self) -> &FileType;
     fn inode(&self) -> u64;
     fn retval(&self) -> i32;
-    fn flags(&self) -> u32;
-    fn flags_str(&self) -> String;
-    fn is_write(&self) -> bool;
+    fn flags_u32(&self) -> u32;
+    fn flags_string(&self) -> String;
+    fn write(&self) -> bool;
 }
 
 impl FileEventCommon for FileOpenEvent {
@@ -349,15 +333,15 @@ impl FileEventCommon for FileOpenEvent {
         self.retval
     }
 
-    fn flags(&self) -> u32 {
-        self.flags
+    fn flags_u32(&self) -> u32 {
+        self.flags_raw()
     }
 
-    fn flags_str(&self) -> String {
+    fn flags_string(&self) -> String {
         self.flags()
     }
 
-    fn is_write(&self) -> bool {
+    fn write(&self) -> bool {
         self.is_write()
     }
 }
@@ -383,15 +367,15 @@ impl FileEventCommon for FileCloseEvent {
         self.retval
     }
 
-    fn flags(&self) -> u32 {
+    fn flags_u32(&self) -> u32 {
         self.flags
     }
 
-    fn flags_str(&self) -> String {
+    fn flags_string(&self) -> String {
         self.flags()
     }
 
-    fn is_write(&self) -> bool {
+    fn write(&self) -> bool {
         self.is_write()
     }
 }
@@ -399,7 +383,7 @@ impl FileEventCommon for FileCloseEvent {
 pub struct SensitivePathRule;
 
 impl SensitivePathRule {
-    fn check<T>(&self, event: &T, ctx: &RuleContext) -> Option<Severity>
+    fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
     where
         T: FileEventCommon,
     {
@@ -422,35 +406,17 @@ impl Rule for SensitivePathRule {
         "SensitivePath"
     }
 
-    fn check_open(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity> {
-        self.check(event, ctx)
-    }
-
-    fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
-        self.check(event, ctx)
-    }
-
-    fn check_process_start(
-        &self,
-        event: &ProcessStartEvent,
-        ctx: &RuleContext,
-    ) -> Option<Severity> {
-        None
-    }
-
-    fn check_process_exit(&self, event: &ProcessExitEvent, ctx: &RuleContext) -> Option<Severity> {
-        None
-    }
+    match_event!(FileOpen, FileClose);
 }
 
 pub struct FlagRule;
 
 impl FlagRule {
-    fn check<T>(&self, event: &T, ctx: &RuleContext) -> Option<Severity>
+    fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
     where
         T: FileEventCommon,
     {
-        match event.flags_str().as_str() {
+        match event.flags_string().as_str() {
             "RDONLY" => Some(Severity::Low),
             "WRONLY" => Some(Severity::Medium),
             "RDWR" => Some(Severity::Medium),
@@ -466,25 +432,7 @@ impl Rule for FlagRule {
         "SensitiveFlag"
     }
 
-    fn check_open(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity> {
-        self.check(event, ctx)
-    }
-
-    fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
-        self.check(event, ctx)
-    }
-
-    fn check_process_exit(&self, event: &ProcessExitEvent, ctx: &RuleContext) -> Option<Severity> {
-        None
-    }
-
-    fn check_process_start(
-        &self,
-        event: &ProcessStartEvent,
-        ctx: &RuleContext,
-    ) -> Option<Severity> {
-        None
-    }
+    match_event!(FileOpen, FileClose);
 }
 
 pub struct RootWriteRule;
@@ -494,7 +442,7 @@ impl RootWriteRule {
     where
         T: FileEventCommon,
     {
-        if event.header().uid == 0 && event.is_write() {
+        if event.header().uid == 0 && event.write() {
             Some(Severity::High)
         } else {
             None
@@ -507,25 +455,7 @@ impl Rule for RootWriteRule {
         "RootWrite"
     }
 
-    fn check_open(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity> {
-        self.check(event, ctx)
-    }
-
-    fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
-        self.check(event, ctx)
-    }
-
-    fn check_process_start(
-        &self,
-        event: &ProcessStartEvent,
-        ctx: &RuleContext,
-    ) -> Option<Severity> {
-        None
-    }
-
-    fn check_process_exit(&self, event: &ProcessExitEvent, ctx: &RuleContext) -> Option<Severity> {
-        None
-    }
+    match_event!(FileOpen, FileClose);
 }
 
 pub struct TempExecutableRule;
@@ -552,35 +482,19 @@ impl Rule for TempExecutableRule {
         "TempExecutable"
     }
 
-    fn check_open(&self, event: &FileOpenEvent, ctx: &RuleContext) -> Option<Severity> {
-        self.check(event, ctx)
-    }
-
-    fn check_close(&self, event: &FileCloseEvent, ctx: &RuleContext) -> Option<Severity> {
-        self.check(event, ctx)
-    }
-
-    fn check_process_start(
-        &self,
-        event: &ProcessStartEvent,
-        ctx: &RuleContext,
-    ) -> Option<Severity> {
-        None
-    }
-
-    fn check_process_exit(&self, event: &ProcessExitEvent, ctx: &RuleContext) -> Option<Severity> {
-        None
-    }
+    match_event!(FileOpen, FileClose);
 }
 
-pub struct FileClassifier {
-    pub process_map: HashMap<u32, ProcessInfo>,
+pub struct Classifier {
+    pub ipsum_file_bytes: Vec<u8>,
+    pub process_map: HashMap<u32, ProcessInfo>, //TODO: unimplemented!()
     pub engine: RuleEngine,
 }
 
-impl FileClassifier {
+impl Classifier {
     pub fn new() -> Self {
         Self {
+            ipsum_file_bytes: Vec::new(),
             process_map: HashMap::new(),
             engine: RuleEngine {
                 rules: vec![
@@ -588,6 +502,8 @@ impl FileClassifier {
                     Box::new(RootWriteRule),
                     Box::new(SensitivePathRule),
                     Box::new(FlagRule),
+                    Box::new(SuspiciousPortRule),
+                    Box::new(SuspiciousIpRule),
                 ],
             },
         }
@@ -596,6 +512,7 @@ impl FileClassifier {
     pub fn classify_open(&self, event: FileOpenEvent) -> Classified<FileOpenEvent> {
         let ctx = RuleContext {
             process_cache: &self.process_map,
+            ipsum_bytes: None,
         };
 
         self.engine.classify_open(event, ctx)
@@ -604,270 +521,149 @@ impl FileClassifier {
     pub fn classify_close(&self, event: FileCloseEvent) -> Classified<FileCloseEvent> {
         let ctx = RuleContext {
             process_cache: &self.process_map,
+            ipsum_bytes: None,
         };
 
         self.engine.classify_close(event, ctx)
     }
-}
 
-// TODO: Test and refine the approach
-pub fn detect_suspicious_network(
-    event: &AcceptEvent,
-    pid_conn_counts: &mut HashMap<u32, (usize, u64)>,
-    pid_ports_seen: &mut HashMap<u32, HashSet<u16>>,
-) -> Vec<SuspiciousEvent> {
-    let mut suspicious = Vec::new();
-
-    let addr = event.endpoints.remote_ip.to_string();
-    // if event.family != 2 && event.family != 10 {
-    //     suspicious.push(SuspiciousEvent {
-    //         pid: event.pid,
-    //         file: addr.clone(),
-    //         reason: format!(
-    //             "Unusual socket family {} (not AF_INET/AF_INET6)",
-    //             event.family
-    //         ),
-    //         severity: Severity::Medium,
-    //         timestamp: event.timestamp,
-    //     });
-    // }
-
-    while let Some(&(_, description, ref sev)) = SUSPICIOUS_PORTS
-        .iter()
-        .find(|&&(p, _, _)| p == event.endpoints.remote_port)
-    {
-        suspicious.push(SuspiciousEvent {
-            pid: event.header.pid,
-            file: addr.clone(),
-            reason: format!(
-                "Connection to suspicious port {}: {}",
-                event.endpoints.remote_port, description
-            ),
-            severity: match sev {
-                Severity::Critical => Severity::Critical,
-                Severity::High => Severity::High,
-                Severity::Medium => Severity::Medium,
-                Severity::Low => Severity::Low,
-                Severity::Info => Severity::Info,
-            },
-            timestamp: event.header.timestamp_ns,
-        });
-    }
-
-    if event.endpoints.remote_port > 0 && event.endpoints.remote_port < 1024 {
-        suspicious.push(SuspiciousEvent {
-            pid: event.header.pid,
-            file: addr.clone(),
-            reason: format!(
-                "Connection to privileged port {}",
-                event.endpoints.remote_port
-            ),
-            severity: Severity::Low,
-            timestamp: event.header.timestamp_ns,
-        });
-    }
-
-    let conn_entry = pid_conn_counts
-        .entry(event.header.pid)
-        .or_insert((0, event.header.timestamp_ns));
-
-    if event.header.timestamp_ns - conn_entry.1 <= TIME_WINDOW_NS {
-        conn_entry.0 += 1;
-    } else {
-        *conn_entry = (1, event.header.timestamp_ns);
-    }
-
-    let conn_count = conn_entry.0;
-    if conn_count == HIGH_CONN_THRESHOLD {
-        suspicious.push(SuspiciousEvent {
-            pid: event.header.pid,
-            file: addr.clone(),
-            reason: format!(
-                "High-frequency connections: {} in 1s (possible DDoS/scanner)",
-                conn_count
-            ),
-            severity: Severity::High,
-            timestamp: event.header.timestamp_ns,
-        });
-    } else if conn_count == MED_CONN_THRESHOLD {
-        suspicious.push(SuspiciousEvent {
-            pid: event.header.pid,
-            file: addr.clone(),
-            reason: format!("Elevated connection rate: {} in 1s", conn_count),
-            severity: Severity::Medium,
-            timestamp: event.header.timestamp_ns,
-        });
-    }
-
-    let ports_seen = pid_ports_seen.entry(event.header.pid).or_default();
-    ports_seen.insert(event.endpoints.remote_port);
-
-    if ports_seen.len() == 20 {
-        suspicious.push(SuspiciousEvent {
-            pid: event.header.pid,
-            file: addr.clone(),
-            reason: format!(
-                "Possible port scan: {} unique ports contacted",
-                ports_seen.len()
-            ),
-            severity: Severity::High,
-            timestamp: event.header.timestamp_ns,
-        });
-    }
-
-    // if event.sockfd < 0 {
-    //     suspicious.push(SuspiciousEvent {
-    //         pid: event.pid,
-    //         file: addr.clone(),
-    //         reason: format!("Invalid sockfd {} in network event", event.sockfd),
-    //         severity: Severity::Low,
-    //         timestamp: event.timestamp,
-    //     });
-    // }
-
-    suspicious.dedup_by(|a, b| {
-        a.pid == b.pid && a.reason == b.reason && a.timestamp.abs_diff(b.timestamp) < TIME_WINDOW_NS
-    });
-
-    suspicious
-}
-
-pub fn detect_input_device_access(events: &mut VecDeque<FileOpenEvent>) -> Vec<SuspiciousEvent> {
-    let mut suspicious = Vec::new();
-    let mut pid_access_counts: HashMap<u32, (usize, u64)> = HashMap::new();
-    let mut pid_devices_seen: HashMap<u32, HashSet<String>> = HashMap::new();
-
-    while let Some(event) = events.pop_front() {
-        let filename = event.file_name().to_string();
-
-        let device_match = INPUT_DEVICE_PATHS
-            .iter()
-            .find(|&&(path, _, _)| filename.starts_with(path));
-
-        let Some(&(_, description, ref sev)) = device_match else {
-            continue;
+    pub fn classify_accept(&self, event: AcceptEvent) -> Classified<AcceptEvent> {
+        let ctx = RuleContext {
+            process_cache: &self.process_map,
+            ipsum_bytes: Some(&self.ipsum_file_bytes),
         };
 
-        suspicious.push(SuspiciousEvent {
-            pid: event.header.pid,
-            file: filename.to_string(),
-            reason: description.to_string(),
-            severity: sev.to_owned(),
-            timestamp: event.header.timestamp_ns,
-        });
+        self.engine.classify_accept(event, ctx)
+    }
 
-        if event.header.uid != 0 {
-            suspicious.push(SuspiciousEvent {
-                pid: event.header.pid,
-                file: filename.to_string(),
-                reason: format!(
-                    "Non-root UID {} reading raw input device - possible keylogger",
-                    event.header.uid
-                ),
-                severity: Severity::High,
-                timestamp: event.header.timestamp_ns,
-            });
-        }
+    pub fn classify_connect(&self, event: ConnectEvent) -> Classified<ConnectEvent> {
+        let ctx = RuleContext {
+            process_cache: &self.process_map,
+            ipsum_bytes: Some(&self.ipsum_file_bytes),
+        };
 
-        for &(flag, reason) in SUSPICIOUS_INPUT_FLAGS {
-            if event.flags as i32 & flag == flag {
-                //TODO: fix this
-                suspicious.push(SuspiciousEvent {
-                    pid: event.header.pid,
-                    file: filename.to_string(),
-                    reason: format!("{} on '{}'", reason, filename),
-                    severity: Severity::High,
-                    timestamp: event.header.timestamp_ns,
-                });
-                break;
+        self.engine.classify_connect(event, ctx)
+    }
+}
+
+trait NetworkCommon {
+    fn endpoints(&self) -> &SocketEndpoints;
+}
+
+impl NetworkCommon for AcceptEvent {
+    fn endpoints(&self) -> &SocketEndpoints {
+        &self.endpoints
+    }
+}
+
+impl NetworkCommon for ConnectEvent {
+    fn endpoints(&self) -> &SocketEndpoints {
+        &self.endpoints
+    }
+}
+
+pub struct SuspiciousPortRule;
+
+impl SuspiciousPortRule {
+    fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
+    where
+        T: NetworkCommon,
+    {
+        SUSPICIOUS_PORTS
+            .iter()
+            .filter_map(|(port, name, sev)| {
+                if port == &event.endpoints().remote_port || port == &event.endpoints().local_port {
+                    Some(sev)
+                } else {
+                    None
+                }
+            })
+            .next()
+            .copied()
+    }
+}
+
+impl Rule for SuspiciousPortRule {
+    fn name(&self) -> &'static str {
+        "SuspiciousPort"
+    }
+
+    match_event!(Accept, Connect);
+}
+
+pub struct SuspiciousIpRule;
+
+impl SuspiciousIpRule {
+    fn check<'a, T>(&self, event: &T, file_bytes: &'a [u8]) -> Option<Severity>
+    where
+        T: NetworkCommon,
+    {
+        let mut severity: Option<Severity> = None;
+        if let Ok(archived) = rkyv::access::<ArchivedIpsumDb, Error>(file_bytes) {
+            match event.endpoints().remote_ip {
+                IpAddr::V4(ip) => {
+                    let key = u32::from(ip);
+                    match archived.v4.binary_search_by_key(&key, |val| val.ip.into()) {
+                        Ok(idx) => {
+                            let score = archived.v4[idx].score;
+                            let sev = match score {
+                                1 => Severity::Medium,
+                                2 => Severity::Medium,
+                                3 => Severity::Medium,
+                                4 => Severity::High,
+                                _ => Severity::Critical,
+                            };
+                            severity = Some(sev);
+                        }
+                        Err(_) => {
+                            tracing::info!("Found none..");
+                            severity = None;
+                        }
+                    }
+                }
+
+                IpAddr::V6(ip) => {
+                    let key = u128::from(ip);
+                    match archived.v6.binary_search_by_key(&key, |val| val.ip.into()) {
+                        Ok(idx) => {
+                            let score = archived.v6[idx].score;
+                            let sev = match score {
+                                1 => Severity::Medium,
+                                2 => Severity::Medium,
+                                3 => Severity::Medium,
+                                4 => Severity::High,
+                                _ => Severity::Critical,
+                            };
+
+                            severity = Some(sev);
+                        }
+                        Err(_) => {
+                            tracing::info!("Found none..");
+                            severity = None;
+                        }
+                    }
+                }
             }
         }
 
-        if u32::from(event.file_type.clone()) & 0o4000 != 0 {
-            suspicious.push(SuspiciousEvent {
-                pid: event.header.pid,
-                file: filename.to_string(),
-                reason: format!("SUID bit set on input device access '{}'", filename),
-                severity: Severity::High,
-                timestamp: event.header.timestamp_ns,
-            });
-        }
-        if u32::from(event.file_type) & 0o2000 != 0 {
-            suspicious.push(SuspiciousEvent {
-                pid: event.header.pid,
-                file: filename.to_string(),
-                reason: format!("SGID bit set on input device access '{}'", filename),
-                severity: Severity::Medium,
-                timestamp: event.header.timestamp_ns,
-            });
-        }
+        severity
+    }
+}
 
-        let entry = pid_access_counts
-            .entry(event.header.pid)
-            .or_insert((0, event.header.timestamp_ns));
-
-        if event.header.timestamp_ns - entry.1 <= TIME_WINDOW_NS {
-            entry.0 += 1;
-        } else {
-            *entry = (1, event.header.timestamp_ns);
-        }
-
-        let count = entry.0;
-        if count == HIGH_READ_THRESHOLD {
-            suspicious.push(SuspiciousEvent {
-                pid: event.header.pid,
-                file: filename.to_string(),
-                reason: format!(
-                    "High-frequency input device polling: {} reads/s - likely a keylogger",
-                    count
-                ),
-                severity: Severity::High,
-                timestamp: event.header.timestamp_ns,
-            });
-        } else if count == MED_READ_THRESHOLD {
-            suspicious.push(SuspiciousEvent {
-                pid: event.header.pid,
-                file: filename.to_string(),
-                reason: format!("Elevated input device polling: {} reads/s", count),
-                severity: Severity::Medium,
-                timestamp: event.header.timestamp_ns,
-            });
-        }
-
-        let devices = pid_devices_seen.entry(event.header.pid).or_default();
-        devices.insert(filename.to_string());
-
-        if devices.len() == 5 {
-            suspicious.push(SuspiciousEvent {
-                pid: event.header.pid,
-                file: filename.to_string(),
-                reason: format!(
-                    "PID {} accessing {} distinct input devices - scraping all inputs",
-                    event.header.pid,
-                    devices.len()
-                ),
-                severity: Severity::High,
-                timestamp: event.header.timestamp_ns,
-            });
-        }
-
-        // if event.dir_fd != libc::AT_FDCWD && event.dir_fd < 0 {
-        //     suspicious.push(SuspiciousEvent {
-        //         pid: event.header.pid,
-        //         file: filename.to_string(),
-        //         reason: format!(
-        //             "Invalid dir_fd {} used to open input device '{}'",
-        //             event.dir_fd, filename
-        //         ),
-        //         severity: Severity::Low,
-        //         timestamp: event.header.timestamp_ns,
-        //     });
-        // }
+impl Rule for SuspiciousIpRule {
+    fn name(&self) -> &'static str {
+        "SuspiciousIp"
     }
 
-    suspicious.dedup_by(|a, b| {
-        a.pid == b.pid && a.reason == b.reason && a.timestamp.abs_diff(b.timestamp) < TIME_WINDOW_NS
-    });
-
-    suspicious
+    fn check(&self, event: Event, ctx: &RuleContext) -> Option<Severity> {
+        if let Some(file_bytes) = ctx.ipsum_bytes {
+            match event {
+                Event::Accept(e) => self.check(e, file_bytes),
+                Event::Connect(e) => self.check(e, file_bytes),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
 }

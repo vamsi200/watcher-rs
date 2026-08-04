@@ -12,7 +12,10 @@ use futures::StreamExt;
 use lru::LruCache;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, restore};
-use std::fs::OpenOptions;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Read};
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
@@ -29,6 +32,7 @@ use tokio::{
     sync::{mpsc::Sender, watch},
 };
 use watcher_rs::app::UiEvent;
+use watcher_rs::gen_db::parse_ipsum;
 use watcher_rs::*;
 use watcher_rs::{
     app::{App, writer_thread},
@@ -131,7 +135,7 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
     };
 
     let network_filter = NetworkFilter {
-        event_mask: NetworkMask::ACCEPT,
+        event_mask: NetworkMask::ACCEPT | NetworkMask::CONNECT,
         ..Default::default()
     };
 
@@ -141,7 +145,9 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
 
     let handle = bpf.run();
     let mut file_event_filter = FileEventFilter::new();
-    let file_classifer = FileClassifier::new();
+    let mut classifier = Classifier::new();
+    let file_bytes = fs::read("/home/vamsi/scripts/watcher-rs/ipsum.bin")?;
+    classifier.ipsum_file_bytes = file_bytes;
 
     loop {
         tokio::select! {
@@ -196,7 +202,7 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
 
                 match event {
                     FileEvent::Open(e) => {
-                        let event = file_classifer.classify_open(e);
+                        let event = classifier.classify_open(e);
 
                         if tx.send(AppEvent::FileOpen(event)).await.is_err() {
                             return Ok(());
@@ -204,7 +210,7 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
                     }
 
                     FileEvent::Close(e) => {
-                        let event = file_classifer.classify_close(e);
+                        let event = classifier.classify_close(e);
 
                         if tx.send(AppEvent::FileClose(event)).await.is_err() {
                             return Ok(());
@@ -218,7 +224,16 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
             Some(event) = network_events.next() => {
                 match event {
                     NetworkEvent::Accept(e) => {
-                        if tx.send(AppEvent::NetworkAccept(e)).await.is_err() {
+                        let event = classifier.classify_accept(e);
+
+                        if tx.send(AppEvent::NetworkAccept(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+
+                    NetworkEvent::Connect(e) => {
+                        let event = classifier.classify_connect(e);
+                        if tx.send(AppEvent::NetworkConnect(event)).await.is_err() {
                             return Ok(());
                         }
                     }
@@ -236,6 +251,7 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
+    // parse_ipsum().unwrap();
     color_eyre::install().unwrap();
     initialize_logging()?;
 
@@ -243,16 +259,6 @@ async fn main() -> color_eyre::Result<()> {
 
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture,)?;
-
-    let process_map: HashMap<u32, ProcessInfo> = HashMap::new(); //TODO
-    let engine = RuleEngine {
-        rules: vec![
-            Box::new(TempExecutableRule),
-            Box::new(RootWriteRule),
-            Box::new(SensitivePathRule),
-            Box::new(FlagRule),
-        ],
-    };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AppEvent>(10000);
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
