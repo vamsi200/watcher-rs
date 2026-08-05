@@ -207,16 +207,33 @@ const SUSPICIOUS_FLAGS: &[(i32, &str)] = &[
 ];
 
 const SUSPICIOUS_PORTS: &[(u16, &str, Severity)] = &[
-    (22, "ssh", Severity::High),
-    (4444, "Metasploit default listener", Severity::High),
-    (1337, "Common backdoor port", Severity::High),
-    (31337, "Elite/Back Orifice backdoor", Severity::High),
-    (9001, "Tor relay port", Severity::Medium),
-    (9050, "Tor SOCKS proxy port", Severity::Medium),
-    (6667, "IRC (common C2 channel)", Severity::Medium),
     (23, "Telnet - unencrypted remote access", Severity::Medium),
-    (512, "rexec - unauthenticated exec", Severity::High),
-    (513, "rlogin - unauthenticated login", Severity::High),
+    (512, "rexec - legacy remote execution", Severity::High),
+    (513, "rlogin - legacy remote login", Severity::High),
+    (514, "rsh - legacy remote shell", Severity::High),
+    (4444, "Metasploit default listener", Severity::High),
+    (5554, "Sasser worm backdoor", Severity::High),
+    (12345, "NetBus backdoor", Severity::High),
+    (27374, "SubSeven backdoor", Severity::High),
+    (31337, "Back Orifice / Elite backdoor", Severity::High),
+    (54321, "Back Orifice 2000 backdoor", Severity::High),
+    (6660, "IRC (common C2 channel)", Severity::Medium),
+    (6661, "IRC (common C2 channel)", Severity::Medium),
+    (6662, "IRC (common C2 channel)", Severity::Medium),
+    (6663, "IRC (common C2 channel)", Severity::Medium),
+    (6664, "IRC (common C2 channel)", Severity::Medium),
+    (6665, "IRC (common C2 channel)", Severity::Medium),
+    (6666, "IRC (common C2 channel)", Severity::Medium),
+    (6667, "IRC (common C2 channel)", Severity::Medium),
+    (6668, "IRC (common C2 channel)", Severity::Medium),
+    (6669, "IRC (common C2 channel)", Severity::Medium),
+    (6697, "IRC over TLS", Severity::Medium),
+    (1080, "SOCKS proxy", Severity::Medium),
+    (9001, "Tor relay port", Severity::Medium),
+    (9030, "Tor directory port", Severity::Medium),
+    (9050, "Tor SOCKS proxy", Severity::Medium),
+    (9051, "Tor control port", Severity::High),
+    (9150, "Tor Browser SOCKS proxy", Severity::Medium),
 ];
 
 const INPUT_DEVICE_PATHS: &[(&str, &str, Severity)] = &[
@@ -486,7 +503,7 @@ impl Rule for TempExecutableRule {
 }
 
 pub struct Classifier {
-    pub ipsum_file_bytes: Vec<u8>,
+    pub ipsum_file_bytes: Option<Vec<u8>>,
     pub process_map: HashMap<u32, ProcessInfo>, //TODO: unimplemented!()
     pub engine: RuleEngine,
 }
@@ -494,7 +511,7 @@ pub struct Classifier {
 impl Classifier {
     pub fn new() -> Self {
         Self {
-            ipsum_file_bytes: Vec::new(),
+            ipsum_file_bytes: None,
             process_map: HashMap::new(),
             engine: RuleEngine {
                 rules: vec![
@@ -502,7 +519,7 @@ impl Classifier {
                     Box::new(RootWriteRule),
                     Box::new(SensitivePathRule),
                     Box::new(FlagRule),
-                    Box::new(SuspiciousPortRule),
+                    Box::new(PortClassificationRule),
                     Box::new(SuspiciousIpRule),
                 ],
             },
@@ -528,18 +545,32 @@ impl Classifier {
     }
 
     pub fn classify_accept(&self, event: AcceptEvent) -> Classified<AcceptEvent> {
-        let ctx = RuleContext {
-            process_cache: &self.process_map,
-            ipsum_bytes: Some(&self.ipsum_file_bytes),
+        let ctx = if let Some(bytes) = &self.ipsum_file_bytes {
+            RuleContext {
+                process_cache: &self.process_map,
+                ipsum_bytes: Some(bytes),
+            }
+        } else {
+            RuleContext {
+                process_cache: &self.process_map,
+                ipsum_bytes: None,
+            }
         };
 
         self.engine.classify_accept(event, ctx)
     }
 
     pub fn classify_connect(&self, event: ConnectEvent) -> Classified<ConnectEvent> {
-        let ctx = RuleContext {
-            process_cache: &self.process_map,
-            ipsum_bytes: Some(&self.ipsum_file_bytes),
+        let ctx = if let Some(bytes) = &self.ipsum_file_bytes {
+            RuleContext {
+                process_cache: &self.process_map,
+                ipsum_bytes: Some(bytes),
+            }
+        } else {
+            RuleContext {
+                process_cache: &self.process_map,
+                ipsum_bytes: None,
+            }
         };
 
         self.engine.classify_connect(event, ctx)
@@ -548,11 +579,21 @@ impl Classifier {
 
 trait NetworkCommon {
     fn endpoints(&self) -> &SocketEndpoints;
+    fn header(&self) -> &EventHeader;
+    fn protocol(&self) -> &Protocol;
 }
 
 impl NetworkCommon for AcceptEvent {
     fn endpoints(&self) -> &SocketEndpoints {
         &self.endpoints
+    }
+
+    fn header(&self) -> &EventHeader {
+        &self.header
+    }
+
+    fn protocol(&self) -> &Protocol {
+        &self.protocol
     }
 }
 
@@ -560,11 +601,17 @@ impl NetworkCommon for ConnectEvent {
     fn endpoints(&self) -> &SocketEndpoints {
         &self.endpoints
     }
+    fn header(&self) -> &EventHeader {
+        &self.header
+    }
+    fn protocol(&self) -> &Protocol {
+        &self.protocol
+    }
 }
 
-pub struct SuspiciousPortRule;
+pub struct PortClassificationRule;
 
-impl SuspiciousPortRule {
+impl PortClassificationRule {
     fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
     where
         T: NetworkCommon,
@@ -583,7 +630,7 @@ impl SuspiciousPortRule {
     }
 }
 
-impl Rule for SuspiciousPortRule {
+impl Rule for PortClassificationRule {
     fn name(&self) -> &'static str {
         "SuspiciousPort"
     }
@@ -664,6 +711,71 @@ impl Rule for SuspiciousIpRule {
             }
         } else {
             None
+        }
+    }
+}
+
+pub enum IpKind {
+    Loopback,
+    Private,
+    LinkLocal,
+    Multicast,
+    Broadcast,
+    Unspecified,
+    Documentation,
+    Public,
+}
+
+pub fn classify(ip: IpAddr) -> IpKind {
+    match ip {
+        IpAddr::V4(ip) => {
+            if ip.is_loopback() {
+                IpKind::Loopback
+            } else if ip.is_private() {
+                IpKind::Private
+            } else if ip.is_link_local() {
+                IpKind::LinkLocal
+            } else if ip.is_multicast() {
+                IpKind::Multicast
+            } else if ip.is_broadcast() {
+                IpKind::Broadcast
+            } else if ip.is_unspecified() {
+                IpKind::Unspecified
+            } else if ip.is_documentation() {
+                IpKind::Documentation
+            } else {
+                IpKind::Public
+            }
+        }
+        IpAddr::V6(ip) => {
+            if ip.is_loopback() {
+                IpKind::Loopback
+            } else if ip.is_unique_local() {
+                IpKind::Private
+            } else if ip.is_unicast_link_local() {
+                IpKind::LinkLocal
+            } else if ip.is_multicast() {
+                IpKind::Multicast
+            } else if ip.is_unspecified() {
+                IpKind::Unspecified
+            } else {
+                IpKind::Public
+            }
+        }
+    }
+}
+
+pub struct IpClassificationRule;
+
+impl IpClassificationRule {
+    fn check<T>(&self, event: &T, _: RuleContext) -> Option<Severity>
+    where
+        T: NetworkCommon,
+    {
+        match classify(event.endpoints().remote_ip) {
+            IpKind::Public => Some(Severity::Low),
+            IpKind::Private | IpKind::Loopback => Some(Severity::Info),
+            _ => None,
         }
     }
 }

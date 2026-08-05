@@ -9,10 +9,12 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode};
 use detection::*;
 use futures::StreamExt;
+use futures::channel::oneshot;
+use libc::{setgid, setuid};
 use lru::LruCache;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, restore};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, create_dir, exists};
 use std::io::{BufRead, BufReader, Read};
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -26,13 +28,14 @@ use std::{
     thread::sleep,
     time::Duration,
 };
+use tokio::task::JoinHandle;
 use tokio::{
     io::unix::AsyncFd,
     signal::ctrl_c,
     sync::{mpsc::Sender, watch},
 };
 use watcher_rs::app::UiEvent;
-use watcher_rs::gen_db::parse_ipsum;
+use watcher_rs::gen_db::{drop_privleges, parse_ipsum};
 use watcher_rs::*;
 use watcher_rs::{
     app::{App, writer_thread},
@@ -47,6 +50,13 @@ use tracing::error;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{self, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
+struct EventSources {
+    process: PollProcess,
+    file: PollFile,
+    network: PollNetwork,
+    state_path: Option<PathBuf>,
+}
+
 pub static PROJECT_NAME: LazyLock<String> =
     LazyLock::new(|| env!("CARGO_CRATE_NAME").to_uppercase().to_string());
 pub static DATA_FOLDER: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
@@ -59,7 +69,7 @@ pub static LOG_ENV: LazyLock<String> =
 pub static LOG_FILE: LazyLock<String> = LazyLock::new(|| format!("{}.log", env!("CARGO_PKG_NAME")));
 
 fn project_directory() -> Option<ProjectDirs> {
-    ProjectDirs::from("com", "kdheepak", env!("CARGO_PKG_NAME"))
+    ProjectDirs::from("com", "", env!("CARGO_PKG_NAME"))
 }
 
 pub fn get_data_dir() -> PathBuf {
@@ -121,32 +131,36 @@ macro_rules! trace_dbg {
     };
 }
 
-async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
-    let mut bpf = Bpfx::new()?;
+pub fn init() -> color_eyre::Result<Option<PathBuf>> {
+    let mut state_dir_path: Option<PathBuf> = None;
+    let state_dir = project_directory().unwrap().state_dir(); //TODO: fix unwrap later
 
-    let process_filter = ProcessFilter {
-        mask: ProcessMask::ALL,
-        ..Default::default()
-    };
+    if let Some(prj_dir) = project_directory() {
+        if let Some(state_dir) = prj_dir.state_dir() {
+            if !exists(state_dir)? {
+                create_dir(state_dir)?;
+            }
+            state_dir_path = Some(state_dir.to_path_buf())
+        }
+    }
 
-    let file_filter = FileFilter {
-        event_type: FileMask::OPEN,
-        ..Default::default()
-    };
+    Ok(state_dir_path)
+}
 
-    let network_filter = NetworkFilter {
-        event_mask: NetworkMask::ACCEPT | NetworkMask::CONNECT,
-        ..Default::default()
-    };
-
-    let mut process_events = bpf.subscribe(process_filter)?;
-    let mut file_events = bpf.subscribe(file_filter)?;
-    let mut network_events = bpf.subscribe(network_filter)?;
-
-    let handle = bpf.run();
+async fn read_events(
+    tx: Sender<AppEvent>,
+    mut sh_rx: watch::Receiver<bool>,
+    mut sources: EventSources,
+) -> anyhow::Result<()> {
     let mut file_event_filter = FileEventFilter::new();
     let mut classifier = Classifier::new();
-    let file_bytes = fs::read("/home/vamsi/scripts/watcher-rs/ipsum.bin")?;
+
+    let file_bytes = if let Some(path) = sources.state_path {
+        Some(fs::read(path.join("ipsum.bin"))?)
+    } else {
+        None
+    };
+
     classifier.ipsum_file_bytes = file_bytes;
 
     loop {
@@ -155,7 +169,7 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
                 break;
             }
 
-            Some(event) = process_events.next() => {
+            Some(event) = sources.process.next() => {
                 match event {
                     ProcessEvent::Start(e) => {
                         if tx.send(AppEvent::ProcessStart(e)).await.is_err() {
@@ -173,7 +187,7 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
                 }
             }
 
-            Some(event) = file_events.next() => {
+            Some(event) = sources.file.next() => {
 
                 if let Some(inode) = event.inode(){
                     let filter_key = FileKey {
@@ -221,7 +235,7 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
                 }
             }
 
-            Some(event) = network_events.next() => {
+            Some(event) = sources.network.next() => {
                 match event {
                     NetworkEvent::Accept(e) => {
                         let event = classifier.classify_accept(e);
@@ -251,11 +265,10 @@ async fn read_events(tx: Sender<AppEvent>, mut sh_rx: watch::Receiver<bool>) -> 
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
-    // parse_ipsum().unwrap();
     color_eyre::install().unwrap();
     initialize_logging()?;
-
     let mut stdout = stdout();
+    let path = init()?;
 
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture,)?;
@@ -269,8 +282,39 @@ async fn main() -> color_eyre::Result<()> {
     let terminal = Terminal::new(backend)?;
     let mut app = App::new();
 
+    let path_clone = path.clone();
+
     tokio::spawn(async move {
-        if let Err(e) = read_events(tx, shutdown_rx).await {
+        let mut bpf = Bpfx::new().unwrap();
+
+        let process_filter = ProcessFilter {
+            mask: ProcessMask::ALL,
+            ..Default::default()
+        };
+
+        let file_filter = FileFilter {
+            event_type: FileMask::OPEN,
+            ..Default::default()
+        };
+
+        let network_filter = NetworkFilter {
+            event_mask: NetworkMask::ACCEPT | NetworkMask::CONNECT,
+            ..Default::default()
+        };
+
+        let sources = EventSources {
+            process: bpf.subscribe(process_filter).unwrap(),
+            file: bpf.subscribe(file_filter).unwrap(),
+            network: bpf.subscribe(network_filter).unwrap(),
+            state_path: path_clone,
+        };
+
+        if let Err(_) = drop_privleges() {
+            eprintln!("failed to drop privileges");
+        }
+
+        let _runtime = bpf.run();
+        if let Err(e) = read_events(tx, shutdown_rx, sources).await {
             eprintln!("{e}");
         }
     });
@@ -281,8 +325,13 @@ async fn main() -> color_eyre::Result<()> {
         }
     });
 
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || parse_ipsum(path)).await;
+    });
+
     app.run(terminal, rx, shutdown_tx, writer_tx, batch_ready_rx)
-        .await?;
+        .await
+        .unwrap();
 
     restore();
     Ok(())

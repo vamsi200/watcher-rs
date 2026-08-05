@@ -1,11 +1,15 @@
 #![allow(unused)]
 use std::{
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions, create_dir, exists},
     io::{BufRead, BufReader, Write},
     net::IpAddr,
+    path::{Path, PathBuf},
     str::FromStr,
+    sync::LazyLock,
 };
 
+use directories::ProjectDirs;
+use libc::{setgid, setuid};
 use rkyv::{rancor::Error, to_bytes};
 
 #[derive(rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
@@ -26,13 +30,42 @@ pub struct IpsumDb {
     pub v6: Box<[EntryV6]>,
 }
 
-pub fn parse_ipsum() -> anyhow::Result<()> {
-    let mut file = File::open("/home/vamsi/scripts/ipsum/ipsum.txt")?;
+pub fn drop_privleges() -> anyhow::Result<()> {
+    tracing::info!("dropping privileges..");
+    let gid = std::env::var("SUDO_GID").ok();
+    let uid = std::env::var("SUDO_UID").ok();
+
+    if let Some(gid) = gid
+        && let Some(uid) = uid
+    {
+        unsafe {
+            setgid(u32::from_str(&gid).unwrap());
+            setuid(u32::from_str(&uid).unwrap());
+        }
+    } else {
+        return anyhow::bail!("Failed to get gid and uid");
+    }
+
+    Ok(())
+}
+
+pub fn parse_ipsum(path: Option<PathBuf>) -> anyhow::Result<()> {
+    let Some(path) = path else {
+        anyhow::bail!("Failed to get state dir");
+    };
+
+    let mut ipsum_bin = path.join("ipsum.bin");
+    if exists(&ipsum_bin)? {
+        return Ok(());
+    }
+
+    let mut file = File::open(path.join("ipsum.txt"))?;
+
     let mut ipsum_bin = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open("/home/vamsi/scripts/watcher-rs/ipsum.bin")?;
+        .open(ipsum_bin)?;
 
     let mut buf = String::new();
     let mut buf_reader = BufReader::new(file);
