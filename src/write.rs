@@ -2,6 +2,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, Write},
+    path::PathBuf,
     thread::panicking,
 };
 
@@ -15,7 +16,7 @@ use rkyv::{
 };
 use tokio::sync::mpsc::Sender;
 
-use crate::{AppEvent, PrivilegeEvent, ProcessEvent, SuspiciousEvent, app::UiEvent};
+use crate::{AppEvent, PrivilegeEvent, ProcessEvent, STATE_PATH, SuspiciousEvent, app::UiEvent};
 use bpfx::file::*;
 use bpfx::network::*;
 use bpfx::process::*;
@@ -37,11 +38,24 @@ impl Default for BatchInfo {
     }
 }
 
+fn log_path() -> anyhow::Result<PathBuf> {
+    Ok(STATE_PATH
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("failed to find state path"))?
+        .join("events.bin"))
+}
+
+fn index_path() -> anyhow::Result<PathBuf> {
+    Ok(STATE_PATH
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("failed to find state path"))?
+        .join("index.bin"))
+}
+
 pub fn write_batch_info_to_disk(info: BatchInfo) -> anyhow::Result<(), anyhow::Error> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("./info")?;
+    let path = index_path()?;
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let bytes = to_bytes::<Error>(&info)?;
 
     file.write_all(&(bytes.len() as u32).to_le_bytes())?;
@@ -53,7 +67,8 @@ pub fn write_batch_info_to_disk(info: BatchInfo) -> anyhow::Result<(), anyhow::E
 pub fn read_batch_info() -> anyhow::Result<Vec<BatchInfo>, anyhow::Error> {
     tracing::info!("called read_batch_info");
     let mut info = Vec::new();
-    let mut file = File::open("./info")?;
+    let path = index_path()?;
+    let mut file = File::open(path)?;
 
     loop {
         let mut len = [0u8; 4];
@@ -75,7 +90,8 @@ pub fn read_batch_info() -> anyhow::Result<Vec<BatchInfo>, anyhow::Error> {
 pub fn read_batch(batch: usize) -> anyhow::Result<Vec<UiEvent>> {
     tracing::info!("reading from disk..");
     let batch_info = read_batch_info()?;
-    let mut file = File::open("./log")?;
+    let path = log_path()?;
+    let mut file = File::open(path)?;
 
     let info = &batch_info[batch];
 
@@ -94,7 +110,8 @@ pub fn read_batch(batch: usize) -> anyhow::Result<Vec<UiEvent>> {
 }
 
 pub async fn write_to_disk(event: &Vec<UiEvent>) -> anyhow::Result<u64> {
-    let mut file = OpenOptions::new().create(true).append(true).open("./log")?;
+    let path = log_path()?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let start_offset = file.metadata()?.len();
     let bytes = to_bytes::<Error>(event)?;
     file.write_all(&(bytes.len() as u32).to_le_bytes())?;
@@ -104,7 +121,8 @@ pub async fn write_to_disk(event: &Vec<UiEvent>) -> anyhow::Result<u64> {
 
 pub fn read_from_log(file_offset: u64) -> anyhow::Result<Vec<UiEvent>, anyhow::Error> {
     let mut events = Vec::new();
-    let mut file = File::open("./log")?;
+    let path = log_path()?;
+    let mut file = File::open(path)?;
 
     file.seek(std::io::SeekFrom::Start(file_offset))?;
 

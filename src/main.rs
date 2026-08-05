@@ -50,11 +50,11 @@ use tracing::error;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{self, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
-struct EventSources {
+struct EventSources<'a> {
     process: PollProcess,
     file: PollFile,
     network: PollNetwork,
-    state_path: Option<PathBuf>,
+    state_path: Option<&'a PathBuf>,
 }
 
 pub static PROJECT_NAME: LazyLock<String> =
@@ -67,10 +67,6 @@ pub static DATA_FOLDER: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
 pub static LOG_ENV: LazyLock<String> =
     LazyLock::new(|| format!("{}_LOGLEVEL", PROJECT_NAME.clone()));
 pub static LOG_FILE: LazyLock<String> = LazyLock::new(|| format!("{}.log", env!("CARGO_PKG_NAME")));
-
-fn project_directory() -> Option<ProjectDirs> {
-    ProjectDirs::from("com", "", env!("CARGO_PKG_NAME"))
-}
 
 pub fn get_data_dir() -> PathBuf {
     let directory = if let Some(s) = DATA_FOLDER.clone() {
@@ -131,26 +127,10 @@ macro_rules! trace_dbg {
     };
 }
 
-pub fn init() -> color_eyre::Result<Option<PathBuf>> {
-    let mut state_dir_path: Option<PathBuf> = None;
-    let state_dir = project_directory().unwrap().state_dir(); //TODO: fix unwrap later
-
-    if let Some(prj_dir) = project_directory() {
-        if let Some(state_dir) = prj_dir.state_dir() {
-            if !exists(state_dir)? {
-                create_dir(state_dir)?;
-            }
-            state_dir_path = Some(state_dir.to_path_buf())
-        }
-    }
-
-    Ok(state_dir_path)
-}
-
-async fn read_events(
+async fn read_events<'a>(
     tx: Sender<AppEvent>,
     mut sh_rx: watch::Receiver<bool>,
-    mut sources: EventSources,
+    mut sources: EventSources<'a>,
 ) -> anyhow::Result<()> {
     let mut file_event_filter = FileEventFilter::new();
     let mut classifier = Classifier::new();
@@ -268,7 +248,6 @@ async fn main() -> color_eyre::Result<()> {
     color_eyre::install().unwrap();
     initialize_logging()?;
     let mut stdout = stdout();
-    let path = init()?;
 
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture,)?;
@@ -281,8 +260,6 @@ async fn main() -> color_eyre::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     let mut app = App::new();
-
-    let path_clone = path.clone();
 
     tokio::spawn(async move {
         let mut bpf = Bpfx::new().unwrap();
@@ -306,7 +283,7 @@ async fn main() -> color_eyre::Result<()> {
             process: bpf.subscribe(process_filter).unwrap(),
             file: bpf.subscribe(file_filter).unwrap(),
             network: bpf.subscribe(network_filter).unwrap(),
-            state_path: path_clone,
+            state_path: STATE_PATH.as_ref(),
         };
 
         if let Err(_) = drop_privleges() {
@@ -326,7 +303,7 @@ async fn main() -> color_eyre::Result<()> {
     });
 
     tokio::spawn(async move {
-        let _ = tokio::task::spawn_blocking(move || parse_ipsum(path)).await;
+        let _ = tokio::task::spawn_blocking(move || parse_ipsum(STATE_PATH.as_ref())).await;
     });
 
     app.run(terminal, rx, shutdown_tx, writer_tx, batch_ready_rx)

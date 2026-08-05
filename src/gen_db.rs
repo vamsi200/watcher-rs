@@ -49,7 +49,7 @@ pub fn drop_privleges() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn parse_ipsum(path: Option<PathBuf>) -> anyhow::Result<()> {
+pub fn parse_ipsum(path: Option<&PathBuf>) -> anyhow::Result<()> {
     let Some(path) = path else {
         anyhow::bail!("Failed to get state dir");
     };

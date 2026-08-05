@@ -7,11 +7,33 @@ pub mod ui;
 pub mod write;
 
 pub use bpfx::{file::*, network::*, process::*};
-use std::fs::read_link;
+use directories::ProjectDirs;
+use std::fs::{create_dir, exists, read_link};
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use crate::app::FILTEREVENTS;
 use crate::detection::Classified;
+
+pub static STATE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| init().unwrap());
+
+pub fn project_directory() -> Option<ProjectDirs> {
+    ProjectDirs::from("com", "", env!("CARGO_PKG_NAME"))
+}
+
+pub fn init() -> color_eyre::Result<Option<PathBuf>> {
+    let mut state_dir_path: Option<PathBuf> = None;
+    if let Some(prj_dir) = project_directory() {
+        if let Some(state_dir) = prj_dir.state_dir() {
+            if !exists(state_dir)? {
+                create_dir(state_dir)?;
+            }
+            state_dir_path = Some(state_dir.to_path_buf())
+        }
+    }
+
+    Ok(state_dir_path)
+}
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct ProcessInfo {
