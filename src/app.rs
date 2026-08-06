@@ -10,6 +10,7 @@ use crate::write::read_batch;
 use crate::write::read_batch_info;
 use crate::write::write_batch_info_to_disk;
 use crate::write::write_to_disk;
+use anyhow::Result;
 use color_eyre::config::FilterCallback;
 use crossterm::event::ModifierKeyCode;
 use crossterm::event::MouseButton;
@@ -39,6 +40,7 @@ use std::time::SystemTime;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
+use tracing::info;
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
@@ -52,23 +54,17 @@ pub enum ViewMode {
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
 pub struct UiEvent {
     pub event: AppEvent,
-    pub detail: String,
-    pub kind: String,
     pub timestamp: String,
     pub severity: Severity,
 }
 
 impl UiEvent {
     pub fn new(ev: AppEvent, twle_hr_format: bool, wallclock_ns: u64) -> Self {
-        let detail = ev.detail();
-        let kind = ev.kind_label();
         let timestamp = format_timestamp_ns(ev.timestamp(), twle_hr_format, wallclock_ns);
         let severity = ev.severity();
 
         UiEvent {
             event: ev,
-            detail,
-            kind: kind.to_string(),
             timestamp,
             severity,
         }
@@ -170,13 +166,17 @@ impl Default for App {
 
 pub async fn writer_thread(
     mut receiver: Receiver<UiEvent>,
+    sender: &Sender<UiEvent>,
     batch_tx: Sender<bool>,
 ) -> anyhow::Result<()> {
     let mut batch = Vec::with_capacity(PER_BATCH_SIZE);
     let mut batch_info = BatchInfo::default();
     let mut count = 0;
+
     while let Some(event) = receiver.recv().await {
+        sender.try_send(event.clone());
         batch.push(event);
+
         if batch.len() >= PER_BATCH_SIZE {
             let start_offset = write_to_disk(&batch).await?;
             count += 1;
@@ -386,7 +386,10 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => self.scroll_down(),
-            MouseEventKind::ScrollUp => self.scroll_up(),
+            MouseEventKind::ScrollUp => {
+                self.follow_tail = false;
+                self.scroll_up()
+            }
             _ => {}
         }
     }
@@ -422,6 +425,7 @@ impl App {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.selected_tab == Focus::Stream {
+                    self.follow_tail = false;
                     self.scroll_up();
                 }
             }
@@ -457,22 +461,9 @@ impl App {
                 if !self.pause {
                     self.follow_tail = true;
                 }
-                if self.total_batches == 0 {
-                    return;
-                }
-                let last_global = self.total_batches * PER_BATCH_SIZE - 1;
 
-                if self.view_mode == ViewMode::History {
-                    if let Err(e) = self.ensure_batches_loaded(last_global) {
-                        tracing::error!("failed to load batch: {e}");
-                        return;
-                    }
-                }
-
-                if !self.filtered_events.is_empty() {
-                    self.view_port.window_start = self.loaded_range.0 * PER_BATCH_SIZE;
-                    self.stream_state
-                        .select(Some(self.filtered_events.len() - 1));
+                if let Some(last) = self.filtered_events.len().checked_sub(1) {
+                    self.stream_state.select(Some(last));
                     self.get_selected();
                 }
             }
@@ -508,6 +499,7 @@ impl App {
         mut sh_tx: watch::Sender<bool>,
         mut writer_tx: Sender<UiEvent>,
         mut batch_rx: Receiver<bool>,
+        mut live_mode_rx: Receiver<UiEvent>,
     ) -> color_eyre::Result<()> {
         let mut last_tick = std::time::Instant::now();
         let tick_rate = Duration::from_millis(100);
@@ -531,18 +523,31 @@ impl App {
             let mut changed = false;
             while batch_rx.try_recv().is_ok() {
                 changed = true;
+                self.total_batches = read_batch_info().unwrap().len();
             }
 
-            if changed {
-                self.total_batches = read_batch_info().unwrap().len();
+            if self.follow_tail {
+                let mut added = false;
 
-                if self.follow_tail {
-                    tracing::info!("following new events");
-                    let last_global = self.total_batches * PER_BATCH_SIZE - 1;
-                    self.ensure_batches_loaded(last_global).unwrap();
-                    self.view_port.window_start = self.loaded_range.0 * PER_BATCH_SIZE;
-                    self.stream_state
-                        .select(Some(self.filtered_events.len().saturating_sub(1)));
+                while let Ok(event) = live_mode_rx.try_recv() {
+                    let idx = self.events.len();
+                    self.events.push(event);
+
+                    if self.search_query.is_empty()
+                        || match_query(&self.events[idx], &self.search_query)
+                    {
+                        self.filtered_events.push(idx);
+                    }
+
+                    added = true;
+                }
+
+                if added && !self.filtered_events.is_empty() {
+                    let last = self.filtered_events.len() - 1;
+
+                    self.stream_state.select(Some(last));
+                    self.view_port.window_start =
+                        last.saturating_sub(self.view_port.height.saturating_sub(1));
                     self.get_selected();
                 }
             }
@@ -650,8 +655,8 @@ impl App {
 }
 
 pub fn match_query(e: &UiEvent, st: &str) -> bool {
-    let detail = &e.detail;
-    let kind = &e.kind;
+    let detail = &e.event.detail();
+    let kind = &e.event.kind_label();
     if st.bytes().all(|b| b.is_ascii_digit()) {
         if e.event.pid().to_string().contains(st) {
             return true;

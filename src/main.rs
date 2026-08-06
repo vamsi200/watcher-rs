@@ -256,6 +256,7 @@ async fn main() -> color_eyre::Result<()> {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<UiEvent>(10000);
     let (batch_ready_tx, mut batch_ready_rx) = tokio::sync::mpsc::channel::<bool>(100);
+    let (live_mode_tx, mut live_mode_rx) = tokio::sync::mpsc::channel::<UiEvent>(10000);
 
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -297,7 +298,7 @@ async fn main() -> color_eyre::Result<()> {
     });
 
     tokio::spawn(async move {
-        if let Err(e) = writer_thread(writer_rx, batch_ready_tx).await {
+        if let Err(e) = writer_thread(writer_rx, &live_mode_tx, batch_ready_tx).await {
             eprintln!("{e}");
         }
     });
@@ -306,9 +307,16 @@ async fn main() -> color_eyre::Result<()> {
         let _ = tokio::task::spawn_blocking(move || parse_ipsum(STATE_PATH.as_ref())).await;
     });
 
-    app.run(terminal, rx, shutdown_tx, writer_tx, batch_ready_rx)
-        .await
-        .unwrap();
+    app.run(
+        terminal,
+        rx,
+        shutdown_tx,
+        writer_tx,
+        batch_ready_rx,
+        live_mode_rx,
+    )
+    .await
+    .unwrap();
 
     restore();
     Ok(())

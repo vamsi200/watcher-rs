@@ -74,8 +74,8 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
 
 const TIME_W: usize = 15;
 const SEV_W: usize = 10;
-const PID_W: usize = 17;
-const TYPE_W: usize = 20;
+const PID_W: usize = 15;
+const TYPE_W: usize = 15;
 
 fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = if app.selected_tab == Focus::Stream {
@@ -141,6 +141,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.view_mode == ViewMode::Live && app.filtered_events.len() >= PER_BATCH_SIZE {
+        tracing::info!("MOVING to history mode");
         app.view_mode = ViewMode::History;
         app.current_batch = 0;
         app.view_port.window_start = 0;
@@ -157,8 +158,8 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         let sev_col = sev_color(&sev);
         let ts = &event.timestamp;
         let pid = event.event.pid();
-        let kind = &event.kind;
-        let detail = &event.detail;
+        let kind = event.event.kind_label();
+        let detail = event.event.detail();
         let border_char = if is_sel { "⯈" } else { " " };
         let bg = if is_sel { C_BG3 } else { C_BG };
 
@@ -496,7 +497,10 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
             Style::default().fg(sev_col).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
-        Span::styled(event.kind.trim().to_string(), Style::default().fg(C_PURPLE)),
+        Span::styled(
+            event.event.kind_label().trim().to_string(),
+            Style::default().fg(C_PURPLE),
+        ),
     ]));
     lines.push(Line::from(Span::styled(
         event.timestamp.clone(),
