@@ -6,22 +6,24 @@ pub mod parser;
 pub mod ui;
 pub mod write;
 
+use anyhow::Result;
 pub use bpfx::{file::*, network::*, process::*};
 use directories::ProjectDirs;
-use std::fs::{create_dir, exists, read_link};
+use std::fs::{OpenOptions, create_dir, exists, read_link};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use crate::app::FILTEREVENTS;
 use crate::detection::Classified;
+use crate::write::{index_path, log_path};
 
-pub static STATE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| init().unwrap());
+pub static STATE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| get_state_dir().unwrap());
 
 pub fn project_directory() -> Option<ProjectDirs> {
     ProjectDirs::from("com", "", env!("CARGO_PKG_NAME"))
 }
 
-pub fn init() -> color_eyre::Result<Option<PathBuf>> {
+pub fn get_state_dir() -> Result<Option<PathBuf>> {
     let mut state_dir_path: Option<PathBuf> = None;
     if let Some(prj_dir) = project_directory() {
         if let Some(state_dir) = prj_dir.state_dir() {
@@ -33,6 +35,22 @@ pub fn init() -> color_eyre::Result<Option<PathBuf>> {
     }
 
     Ok(state_dir_path)
+}
+
+pub fn init() -> color_eyre::Result<()> {
+    tracing::info!("truncating log and index file");
+    let _ = OpenOptions::new()
+        .truncate(true)
+        .write(true)
+        .create(true)
+        .open(log_path().unwrap());
+    let _ = OpenOptions::new()
+        .truncate(true)
+        .write(true)
+        .create(true)
+        .open(index_path().unwrap());
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
@@ -115,8 +133,8 @@ pub enum EventType {
     Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
 pub enum AppEvent {
-    ProcessStart(ProcessStartEvent),
-    ProcessExit(ProcessExitEvent),
+    ProcessStart(Classified<ProcessStartEvent>),
+    ProcessExit(Classified<ProcessExitEvent>),
     FileOpen(Classified<FileOpenEvent>),
     FileClose(Classified<FileCloseEvent>),
     NetworkAccept(Classified<AcceptEvent>),
@@ -153,8 +171,8 @@ impl AppEvent {
 
     pub fn timestamp(&self) -> u64 {
         match self {
-            AppEvent::ProcessStart(e) => e.header.timestamp_ns,
-            AppEvent::ProcessExit(e) => e.header.timestamp_ns,
+            AppEvent::ProcessStart(e) => e.event.header.timestamp_ns,
+            AppEvent::ProcessExit(e) => e.event.header.timestamp_ns,
             AppEvent::FileOpen(e) => e.event.header.timestamp_ns,
             AppEvent::FileClose(e) => e.event.header.timestamp_ns,
             AppEvent::NetworkAccept(e) => e.event.header.timestamp_ns,
@@ -164,8 +182,8 @@ impl AppEvent {
 
     pub fn pid(&self) -> u32 {
         match self {
-            AppEvent::ProcessStart(e) => e.header.pid,
-            AppEvent::ProcessExit(e) => e.header.pid,
+            AppEvent::ProcessStart(e) => e.event.header.pid,
+            AppEvent::ProcessExit(e) => e.event.header.pid,
             AppEvent::FileOpen(e) => e.event.header.pid,
             AppEvent::FileClose(e) => e.event.header.pid,
             AppEvent::NetworkAccept(e) => e.event.header.pid,
@@ -199,10 +217,10 @@ impl AppEvent {
     pub fn detail(&self) -> String {
         match self {
             AppEvent::ProcessStart(e) => {
-                format!("exec {}", &e.filename)
+                format!("exec {}", &e.event.filename)
             }
             AppEvent::ProcessExit(e) => {
-                format!("pid {} exited", e.header.pid)
+                format!("pid {} exited", e.event.header.pid)
             }
             AppEvent::FileOpen(e) => e.event.file_path.clone(),
             AppEvent::FileClose(e) => {

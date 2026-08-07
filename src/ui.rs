@@ -511,27 +511,41 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
     match &event.event {
         AppEvent::ProcessStart(e) => {
             section(&mut lines, "ProcessStart");
-            kv(&mut lines, "pid ", &e.header.pid.to_string(), C_TEXT);
-            kv(&mut lines, "ppid ", &e.header.ppid.to_string(), C_TEXT);
+            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
+            kv(
+                &mut lines,
+                "ppid ",
+                &e.event.header.ppid.to_string(),
+                C_TEXT,
+            );
             kv(
                 &mut lines,
                 "uid",
-                &uid_label(e.header.uid),
-                uid_color(e.header.uid),
+                &uid_label(e.event.header.uid),
+                uid_color(e.event.header.uid),
             );
-            kv(&mut lines, "filename ", &e.filename, C_PATH);
-            kv(&mut lines, "comm ", &&e.header.comm, C_PATH);
+            kv(&mut lines, "filename ", &e.event.filename, C_PATH);
+            kv(&mut lines, "comm ", &&e.event.header.comm, C_PATH);
         }
         AppEvent::ProcessExit(e) => {
-            let ok = e.exit_code >= 0;
+            let ok = e.event.exit_code >= 0;
             section(&mut lines, "ProcessExit");
-            kv(&mut lines, "pid", &e.header.pid.to_string(), C_TEXT);
-            kv(&mut lines, "ppid ", &e.header.ppid.to_string(), C_TEXT);
-            kv(&mut lines, "comm ", &&e.header.comm, C_PATH);
+            kv(&mut lines, "pid", &e.event.header.pid.to_string(), C_TEXT);
+            kv(
+                &mut lines,
+                "ppid ",
+                &e.event.header.ppid.to_string(),
+                C_TEXT,
+            );
+            kv(&mut lines, "comm ", &&e.event.header.comm, C_PATH);
             kv(
                 &mut lines,
                 "retval",
-                &format!("{} ({})", e.exit_code, if ok { "ok" } else { "failed" }),
+                &format!(
+                    "{} ({})",
+                    e.event.exit_code,
+                    if ok { "ok" } else { "failed" }
+                ),
                 if ok { C_TEXT } else { C_RED },
             );
         }

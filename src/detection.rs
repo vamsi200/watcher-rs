@@ -21,6 +21,141 @@ use std::{
     path::{self, PathBuf},
 };
 
+macro_rules! impl_file_header {
+    () => {
+        fn header(&self) -> &EventHeader {
+            &self.header
+        }
+    };
+}
+
+macro_rules! impl_file_path {
+    () => {
+        fn file_path(&self) -> &str {
+            &self.file_path
+        }
+    };
+}
+
+macro_rules! impl_file_type {
+    () => {
+        fn file_type(&self) -> &FileType {
+            &self.file_type
+        }
+    };
+}
+
+macro_rules! impl_file_inode {
+    () => {
+        fn inode(&self) -> u64 {
+            self.inode
+        }
+    };
+}
+
+macro_rules! impl_file_retval {
+    () => {
+        fn retval(&self) -> i32 {
+            self.retval
+        }
+    };
+}
+
+macro_rules! impl_file_retval_read {
+    () => {
+        fn retval(&self) -> i32 {
+            self.retval as i32
+        }
+    };
+}
+
+macro_rules! impl_file_flags {
+    () => {
+        fn flags_u32(&self) -> u32 {
+            self.flags
+        }
+    };
+}
+
+macro_rules! impl_file_flags_string {
+    () => {
+        fn flags_string(&self) -> String {
+            self.flags()
+        }
+    };
+}
+
+macro_rules! impl_file_write {
+    () => {
+        fn write(&self) -> bool {
+            self.is_write()
+        }
+    };
+}
+
+macro_rules! root_impl {
+    ($type: ident) => {
+        fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
+        where
+            T: $type,
+        {
+            if event.header().uid == 0 {
+                Some(Severity::Low)
+            } else {
+                None
+            }
+        }
+    };
+}
+
+macro_rules! generic_file_impl {
+    ($type:ident, $retval_impl:ident) => {
+        impl HasHeader for $type {
+            impl_file_header!();
+        }
+
+        impl HasFilePath for $type {
+            impl_file_path!();
+        }
+
+        impl HasFileType for $type {
+            impl_file_type!();
+        }
+
+        impl HasInode for $type {
+            impl_file_inode!();
+        }
+
+        impl HasRetval for $type {
+            $retval_impl!();
+        }
+
+        impl HasFlags for $type {
+            impl_file_flags!();
+        }
+
+        impl HasWrite for $type {
+            impl_file_write!();
+        }
+    };
+}
+
+macro_rules! impl_network_common {
+    () => {
+        fn endpoints(&self) -> &SocketEndpoints {
+            &self.endpoints
+        }
+
+        fn header(&self) -> &EventHeader {
+            &self.header
+        }
+
+        fn protocol(&self) -> &Protocol {
+            &self.protocol
+        }
+    };
+}
+
 macro_rules! match_event {
     ($($variant:ident), + $(,)?) => {
         fn check(&self, event: Event, ctx: &RuleContext) -> Option<Severity> {
@@ -52,6 +187,23 @@ macro_rules! classify {
                 severity,
                 matched_rules,
             }
+        }
+    };
+}
+
+macro_rules! classify_classifier {
+    ($fn_name:ident, $event:ty, $need_bytes:literal) => {
+        pub fn $fn_name(&self, event: $event) -> Classified<$event> {
+            let ctx = RuleContext {
+                process_cache: &self.process_map,
+                ipsum_bytes: if $need_bytes {
+                    self.ipsum_file_bytes.as_deref()
+                } else {
+                    None
+                },
+            };
+
+            self.engine.$fn_name(event, ctx)
         }
     };
 }
@@ -98,10 +250,6 @@ impl FileEventFilter {
             }
         }
 
-        // if event.file_path().is_some_and(|x| check_path(x)) {
-        //     return false;
-        // }
-        //
         false
     }
 }
@@ -129,17 +277,6 @@ const MED_FREQ_THRESHOLD: usize = 20;
 const HIGH_CONN_THRESHOLD: usize = 100;
 const MED_CONN_THRESHOLD: usize = 40;
 const TIME_WINDOW_NS: u64 = 1_000_000_000;
-
-const SENSITIVE_PATHS: &[&str] = &[
-    "/etc/passwd",
-    "/etc/shadow",
-    "/etc/sudoers",
-    "/root/",
-    "/.ssh/",
-    "/proc/",
-    "/sys/kernel/",
-    "/boot/",
-];
 
 pub const PATH_SEVERITY: &[(&str, Severity)] = &[
     // Critical
@@ -206,36 +343,37 @@ const SUSPICIOUS_FLAGS: &[(i32, &str)] = &[
     (libc::O_WRONLY | libc::O_APPEND, "appending to file"),
 ];
 
-const SUSPICIOUS_PORTS: &[(u16, &str, Severity)] = &[
-    (23, "Telnet - unencrypted remote access", Severity::Medium),
-    (512, "rexec - legacy remote execution", Severity::High),
-    (513, "rlogin - legacy remote login", Severity::High),
-    (514, "rsh - legacy remote shell", Severity::High),
-    (4444, "Metasploit default listener", Severity::High),
-    (5554, "Sasser worm backdoor", Severity::High),
-    (12345, "NetBus backdoor", Severity::High),
-    (27374, "SubSeven backdoor", Severity::High),
-    (31337, "Back Orifice / Elite backdoor", Severity::High),
-    (54321, "Back Orifice 2000 backdoor", Severity::High),
-    (6660, "IRC (common C2 channel)", Severity::Medium),
-    (6661, "IRC (common C2 channel)", Severity::Medium),
-    (6662, "IRC (common C2 channel)", Severity::Medium),
-    (6663, "IRC (common C2 channel)", Severity::Medium),
-    (6664, "IRC (common C2 channel)", Severity::Medium),
-    (6665, "IRC (common C2 channel)", Severity::Medium),
-    (6666, "IRC (common C2 channel)", Severity::Medium),
-    (6667, "IRC (common C2 channel)", Severity::Medium),
-    (6668, "IRC (common C2 channel)", Severity::Medium),
-    (6669, "IRC (common C2 channel)", Severity::Medium),
-    (6697, "IRC over TLS", Severity::Medium),
-    (1080, "SOCKS proxy", Severity::Medium),
-    (9001, "Tor relay port", Severity::Medium),
-    (9030, "Tor directory port", Severity::Medium),
-    (9050, "Tor SOCKS proxy", Severity::Medium),
-    (9051, "Tor control port", Severity::High),
-    (9150, "Tor Browser SOCKS proxy", Severity::Medium),
+const SUSPICIOUS_PORTS: &[(u16, Severity)] = &[
+    (23, Severity::Medium),
+    (512, Severity::High),
+    (513, Severity::High),
+    (514, Severity::High),
+    (4444, Severity::High),
+    (5554, Severity::High),
+    (12345, Severity::High),
+    (27374, Severity::High),
+    (31337, Severity::High),
+    (54321, Severity::High),
+    (6660, Severity::Medium),
+    (6661, Severity::Medium),
+    (6662, Severity::Medium),
+    (6663, Severity::Medium),
+    (6664, Severity::Medium),
+    (6665, Severity::Medium),
+    (6666, Severity::Medium),
+    (6667, Severity::Medium),
+    (6668, Severity::Medium),
+    (6669, Severity::Medium),
+    (6697, Severity::Medium),
+    (1080, Severity::Medium),
+    (9001, Severity::Medium),
+    (9030, Severity::Medium),
+    (9050, Severity::Medium),
+    (9051, Severity::High),
+    (9150, Severity::Medium),
 ];
 
+//TODO: Use this
 const INPUT_DEVICE_PATHS: &[(&str, &str, Severity)] = &[
     (
         "/dev/input/",
@@ -271,9 +409,6 @@ const SUSPICIOUS_INPUT_FLAGS: &[(i32, &str)] = &[
     (libc::O_RDWR, "Read-write access to input device"),
 ];
 
-const HIGH_READ_THRESHOLD: usize = 200;
-const MED_READ_THRESHOLD: usize = 80;
-
 pub struct RuleContext<'a> {
     pub process_cache: &'a HashMap<u32, ProcessInfo>,
     pub ipsum_bytes: Option<&'a [u8]>,
@@ -288,17 +423,20 @@ pub struct Classified<T> {
     pub matched_rules: Vec<String>,
 }
 
-type ClassifiedFileOpenEvent = Classified<FileOpenEvent>;
-type ClassifiedFileCloseEvent = Classified<FileCloseEvent>;
-type ClassifiedProcessStartEvent = Classified<ProcessStartEvent>;
-
 pub enum Event<'a> {
     FileOpen(&'a FileOpenEvent),
     FileClose(&'a FileCloseEvent),
+    FileRead(&'a FileReadEvent),
+    FileRename(&'a FileRenameEvent),
+    FileWrite(&'a FileWriteEvent),
     ProcessStart(&'a ProcessStartEvent),
     ProcessExit(&'a ProcessExitEvent),
+    ProcessFork(&'a ProcessForkEvent),
     Accept(&'a AcceptEvent),
     Connect(&'a ConnectEvent),
+    Bind(&'a BindEvent),
+    Listen(&'a ListenEvent),
+    NetworkClose(&'a CloseEvent),
 }
 
 pub trait Rule: Send + Sync {
@@ -313,96 +451,93 @@ pub struct RuleEngine {
 impl RuleEngine {
     classify!(classify_open, FileOpen, FileOpenEvent);
     classify!(classify_close, FileClose, FileCloseEvent);
+    classify!(classify_read, FileRead, FileReadEvent);
+    classify!(classify_rename, FileRename, FileRenameEvent);
+    classify!(classify_write, FileWrite, FileWriteEvent);
+
     classify!(classify_process_start, ProcessStart, ProcessStartEvent);
+    classify!(classify_process_exit, ProcessExit, ProcessExitEvent);
+    classify!(classify_process_fork, ProcessFork, ProcessForkEvent);
+
     classify!(classify_accept, Accept, AcceptEvent);
     classify!(classify_connect, Connect, ConnectEvent);
+    classify!(classify_bind, Bind, BindEvent);
+    classify!(classify_listen, Listen, ListenEvent);
+    classify!(classify_network_close, NetworkClose, CloseEvent);
 }
 
-trait FileEventCommon {
+trait HasHeader {
     fn header(&self) -> &EventHeader;
+}
+
+trait HasFilePath {
     fn file_path(&self) -> &str;
+}
+
+trait HasFileType {
     fn file_type(&self) -> &FileType;
+}
+
+trait HasInode {
     fn inode(&self) -> u64;
+}
+
+trait HasRetval {
     fn retval(&self) -> i32;
+}
+
+trait HasFlags {
     fn flags_u32(&self) -> u32;
-    fn flags_string(&self) -> String;
+
+    fn flags_string(&self) -> String {
+        self.flags_u32().to_string()
+    }
+}
+
+trait HasWrite {
     fn write(&self) -> bool;
 }
 
-impl FileEventCommon for FileOpenEvent {
-    fn header(&self) -> &EventHeader {
-        &self.header
-    }
+generic_file_impl!(FileOpenEvent, impl_file_retval);
+generic_file_impl!(FileCloseEvent, impl_file_retval);
 
-    fn file_path(&self) -> &str {
-        &self.file_path
-    }
-
-    fn file_type(&self) -> &FileType {
-        &self.file_type
-    }
-
-    fn inode(&self) -> u64 {
-        self.inode
-    }
-
-    fn retval(&self) -> i32 {
-        self.retval
-    }
-
-    fn flags_u32(&self) -> u32 {
-        self.flags_raw()
-    }
-
-    fn flags_string(&self) -> String {
-        self.flags()
-    }
-
-    fn write(&self) -> bool {
-        self.is_write()
-    }
+impl HasHeader for FileRenameEvent {
+    impl_file_header!();
 }
 
-impl FileEventCommon for FileCloseEvent {
-    fn header(&self) -> &EventHeader {
-        &self.header
-    }
-
-    fn file_path(&self) -> &str {
-        &self.file_path
-    }
-
-    fn file_type(&self) -> &FileType {
-        &self.file_type
-    }
-
-    fn inode(&self) -> u64 {
-        self.inode
-    }
-
-    fn retval(&self) -> i32 {
-        self.retval
-    }
-
-    fn flags_u32(&self) -> u32 {
-        self.flags
-    }
-
-    fn flags_string(&self) -> String {
-        self.flags()
-    }
-
-    fn write(&self) -> bool {
-        self.is_write()
-    }
+impl HasFileType for FileRenameEvent {
+    impl_file_type!();
 }
+
+impl HasFlags for FileRenameEvent {
+    impl_file_flags!();
+}
+
+impl HasRetval for FileRenameEvent {
+    impl_file_retval!();
+}
+
+impl HasHeader for FileDeleteEvent {
+    impl_file_header!();
+}
+
+impl HasFileType for FileDeleteEvent {
+    impl_file_type!();
+}
+
+impl HasRetval for FileDeleteEvent {
+    impl_file_retval!();
+}
+
+generic_file_impl!(FileReadEvent, impl_file_retval_read);
+generic_file_impl!(FileWriteEvent, impl_file_retval_read);
 
 pub struct SensitivePathRule;
 
 impl SensitivePathRule {
     fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
     where
-        T: FileEventCommon,
+        T: HasFilePath,
     {
         PATH_SEVERITY
             .iter()
@@ -431,7 +566,7 @@ pub struct FlagRule;
 impl FlagRule {
     fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
     where
-        T: FileEventCommon,
+        T: HasFlags,
     {
         match event.flags_string().as_str() {
             "RDONLY" => Some(Severity::Low),
@@ -457,7 +592,7 @@ pub struct RootWriteRule;
 impl RootWriteRule {
     fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
     where
-        T: FileEventCommon,
+        T: HasHeader + HasWrite,
     {
         if event.header().uid == 0 && event.write() {
             Some(Severity::High)
@@ -480,7 +615,7 @@ pub struct TempExecutableRule;
 impl TempExecutableRule {
     fn check<T>(&self, event: &T, ctx: &RuleContext) -> Option<Severity>
     where
-        T: FileEventCommon,
+        T: HasHeader,
     {
         let Some(proc) = ctx.process_cache.get(&event.header().pid) else {
             return None;
@@ -521,60 +656,31 @@ impl Classifier {
                     Box::new(FlagRule),
                     Box::new(PortClassificationRule),
                     Box::new(SuspiciousIpRule),
+                    Box::new(IpClassificationRule),
+                    Box::new(RunAsRootRule),
+                    Box::new(BindConnRules),
+                    Box::new(RunAsRootProcessRule),
+                    Box::new(SuspiciousExecPath),
                 ],
             },
         }
     }
 
-    pub fn classify_open(&self, event: FileOpenEvent) -> Classified<FileOpenEvent> {
-        let ctx = RuleContext {
-            process_cache: &self.process_map,
-            ipsum_bytes: None,
-        };
+    classify_classifier!(classify_open, FileOpenEvent, false);
+    classify_classifier!(classify_close, FileCloseEvent, false);
+    classify_classifier!(classify_read, FileReadEvent, false);
+    classify_classifier!(classify_rename, FileRenameEvent, false);
+    classify_classifier!(classify_write, FileWriteEvent, false);
 
-        self.engine.classify_open(event, ctx)
-    }
+    classify_classifier!(classify_accept, AcceptEvent, true);
+    classify_classifier!(classify_connect, ConnectEvent, true);
+    classify_classifier!(classify_bind, BindEvent, false);
+    classify_classifier!(classify_listen, ListenEvent, false);
+    classify_classifier!(classify_network_close, CloseEvent, false);
 
-    pub fn classify_close(&self, event: FileCloseEvent) -> Classified<FileCloseEvent> {
-        let ctx = RuleContext {
-            process_cache: &self.process_map,
-            ipsum_bytes: None,
-        };
-
-        self.engine.classify_close(event, ctx)
-    }
-
-    pub fn classify_accept(&self, event: AcceptEvent) -> Classified<AcceptEvent> {
-        let ctx = if let Some(bytes) = &self.ipsum_file_bytes {
-            RuleContext {
-                process_cache: &self.process_map,
-                ipsum_bytes: Some(bytes),
-            }
-        } else {
-            RuleContext {
-                process_cache: &self.process_map,
-                ipsum_bytes: None,
-            }
-        };
-
-        self.engine.classify_accept(event, ctx)
-    }
-
-    pub fn classify_connect(&self, event: ConnectEvent) -> Classified<ConnectEvent> {
-        let ctx = if let Some(bytes) = &self.ipsum_file_bytes {
-            RuleContext {
-                process_cache: &self.process_map,
-                ipsum_bytes: Some(bytes),
-            }
-        } else {
-            RuleContext {
-                process_cache: &self.process_map,
-                ipsum_bytes: None,
-            }
-        };
-
-        self.engine.classify_connect(event, ctx)
-    }
+    classify_classifier!(classify_process_start, ProcessStartEvent, false);
+    classify_classifier!(classify_process_exit, ProcessExitEvent, false);
+    classify_classifier!(classify_process_fork, ProcessForkEvent, false);
 }
 
 trait NetworkCommon {
@@ -584,29 +690,23 @@ trait NetworkCommon {
 }
 
 impl NetworkCommon for AcceptEvent {
-    fn endpoints(&self) -> &SocketEndpoints {
-        &self.endpoints
-    }
-
-    fn header(&self) -> &EventHeader {
-        &self.header
-    }
-
-    fn protocol(&self) -> &Protocol {
-        &self.protocol
-    }
+    impl_network_common!();
 }
 
 impl NetworkCommon for ConnectEvent {
-    fn endpoints(&self) -> &SocketEndpoints {
-        &self.endpoints
-    }
-    fn header(&self) -> &EventHeader {
-        &self.header
-    }
-    fn protocol(&self) -> &Protocol {
-        &self.protocol
-    }
+    impl_network_common!();
+}
+
+impl NetworkCommon for BindEvent {
+    impl_network_common!();
+}
+
+impl NetworkCommon for ListenEvent {
+    impl_network_common!();
+}
+
+impl NetworkCommon for CloseEvent {
+    impl_network_common!();
 }
 
 pub struct PortClassificationRule;
@@ -618,7 +718,7 @@ impl PortClassificationRule {
     {
         SUSPICIOUS_PORTS
             .iter()
-            .filter_map(|(port, name, sev)| {
+            .filter_map(|(port, sev)| {
                 if port == &event.endpoints().remote_port || port == &event.endpoints().local_port {
                     Some(sev)
                 } else {
@@ -663,7 +763,6 @@ impl SuspiciousIpRule {
                             severity = Some(sev);
                         }
                         Err(_) => {
-                            tracing::info!("Found none..");
                             severity = None;
                         }
                     }
@@ -685,7 +784,6 @@ impl SuspiciousIpRule {
                             severity = Some(sev);
                         }
                         Err(_) => {
-                            tracing::info!("Found none..");
                             severity = None;
                         }
                     }
@@ -768,7 +866,7 @@ pub fn classify(ip: IpAddr) -> IpKind {
 pub struct IpClassificationRule;
 
 impl IpClassificationRule {
-    fn check<T>(&self, event: &T, _: RuleContext) -> Option<Severity>
+    fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
     where
         T: NetworkCommon,
     {
@@ -778,4 +876,115 @@ impl IpClassificationRule {
             _ => None,
         }
     }
+}
+
+impl Rule for IpClassificationRule {
+    fn name(&self) -> &'static str {
+        "IpClassification"
+    }
+
+    match_event!(Bind, Listen, Connect, Accept);
+}
+
+pub struct RunAsRootRule;
+
+impl RunAsRootRule {
+    root_impl!(NetworkCommon);
+}
+
+impl Rule for RunAsRootRule {
+    fn name(&self) -> &'static str {
+        "RunAsRoot"
+    }
+
+    match_event!(Listen, Connect);
+}
+
+pub struct BindConnRules;
+
+impl BindConnRules {
+    fn check(&self, event: &BindEvent, _: &RuleContext) -> Option<Severity> {
+        if event.endpoints.local_ip.is_unspecified() || event.endpoints().local_port < 1024 {
+            return Some(Severity::Low);
+        } else {
+            None
+        }
+    }
+}
+
+impl Rule for BindConnRules {
+    fn name(&self) -> &'static str {
+        "GenericBindRule"
+    }
+
+    match_event!(Bind);
+}
+
+trait ProcessCommon {
+    fn header(&self) -> &EventHeader;
+}
+
+impl ProcessCommon for ProcessStartEvent {
+    fn header(&self) -> &EventHeader {
+        &self.header
+    }
+}
+
+impl ProcessCommon for ProcessExitEvent {
+    fn header(&self) -> &EventHeader {
+        &self.header
+    }
+}
+
+impl ProcessCommon for ProcessForkEvent {
+    fn header(&self) -> &EventHeader {
+        &self.parent
+    }
+}
+
+pub struct SuspiciousExecPath;
+
+const SUSPICIOUS_EXEC_PATHS: &[(&str, Severity)] = &[
+    ("/tmp", Severity::Medium),
+    ("/var/tmp", Severity::Medium),
+    ("/dev/shm", Severity::Medium),
+    ("/run/user", Severity::Low),
+    ("/var/run", Severity::Low),
+];
+
+impl SuspiciousExecPath {
+    fn check(&self, event: &ProcessStartEvent, _: &RuleContext) -> Option<Severity> {
+        SUSPICIOUS_EXEC_PATHS
+            .iter()
+            .filter_map(|(s, sev)| {
+                if event.filename.starts_with(s) {
+                    Some(sev)
+                } else {
+                    None
+                }
+            })
+            .next()
+            .copied()
+    }
+}
+
+impl Rule for SuspiciousExecPath {
+    fn name(&self) -> &'static str {
+        "SuspiciousExecPath"
+    }
+
+    match_event!(ProcessStart);
+}
+pub struct RunAsRootProcessRule;
+
+impl RunAsRootProcessRule {
+    root_impl!(ProcessCommon);
+}
+
+impl Rule for RunAsRootProcessRule {
+    fn name(&self) -> &'static str {
+        "ProcessRunningAsRoot"
+    }
+
+    match_event!(ProcessStart, ProcessExit, ProcessFork);
 }

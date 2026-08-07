@@ -152,12 +152,14 @@ async fn read_events<'a>(
             Some(event) = sources.process.next() => {
                 match event {
                     ProcessEvent::Start(e) => {
+                        let e = classifier.classify_process_start(e);
                         if tx.send(AppEvent::ProcessStart(e)).await.is_err() {
                             return Ok(());
                         }
                     }
 
                     ProcessEvent::Exit(e) => {
+                        let e = classifier.classify_process_exit(e);
                         if tx.send(AppEvent::ProcessExit(e)).await.is_err() {
                             return Ok(());
                         }
@@ -271,12 +273,12 @@ async fn main() -> color_eyre::Result<()> {
         };
 
         let file_filter = FileFilter {
-            event_type: FileMask::OPEN,
+            event_type: FileMask::ALL,
             ..Default::default()
         };
 
         let network_filter = NetworkFilter {
-            event_mask: NetworkMask::ACCEPT | NetworkMask::CONNECT,
+            event_mask: NetworkMask::ALL,
             ..Default::default()
         };
 
@@ -291,6 +293,7 @@ async fn main() -> color_eyre::Result<()> {
             eprintln!("failed to drop privileges");
         }
 
+        init().unwrap();
         let _runtime = bpf.run();
         if let Err(e) = read_events(tx, shutdown_rx, sources).await {
             eprintln!("{e}");

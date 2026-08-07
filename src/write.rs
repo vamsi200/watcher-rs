@@ -38,14 +38,14 @@ impl Default for BatchInfo {
     }
 }
 
-fn log_path() -> anyhow::Result<PathBuf> {
+pub fn log_path() -> anyhow::Result<PathBuf> {
     Ok(STATE_PATH
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("failed to find state path"))?
         .join("events.bin"))
 }
 
-fn index_path() -> anyhow::Result<PathBuf> {
+pub fn index_path() -> anyhow::Result<PathBuf> {
     Ok(STATE_PATH
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("failed to find state path"))?
@@ -151,25 +151,25 @@ fn test_write() {
         comm: String::new(),
     };
 
-    events.push(AppEvent::ProcessStart(ProcessStartEvent {
-        header: event_header,
-        filename: String::new(),
-    }));
-
-    let event_header_2 = bpfx::EventHeader {
-        timestamp_ns: 130,
-        pid: 13,
-        tid: 233,
-        ppid: 3245,
-        uid: 183,
-        gid: 153,
-        comm: String::new(),
-    };
-
-    events.push(AppEvent::ProcessStart(ProcessStartEvent {
-        header: event_header_2,
-        filename: String::new(),
-    }));
+    // events.push(AppEvent::ProcessStart(ProcessStartEvent {
+    //     header: event_header,
+    //     filename: String::new(),
+    // }));
+    //
+    // let event_header_2 = bpfx::EventHeader {
+    //     timestamp_ns: 130,
+    //     pid: 13,
+    //     tid: 233,
+    //     ppid: 3245,
+    //     uid: 183,
+    //     gid: 153,
+    //     comm: String::new(),
+    // };
+    //
+    // events.push(AppEvent::ProcessStart(ProcessStartEvent {
+    //     header: event_header_2,
+    //     filename: String::new(),
+    // }));
 
     // write_to_disk(&events).unwrap();
     // write_to_disk(ev2).unwrap();
