@@ -28,9 +28,24 @@ use bpfx::process::*;
 
 pub const PER_BATCH_SIZE: usize = 1000;
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
 pub struct LogConfig {
+    pub max_segment_size_mib: f64,
+    pub max_storage_size_gib: f64,
+}
+
+pub struct RuntimeLogConfig {
     pub max_segment_size: u64,
     pub max_storage_size: u64,
+}
+
+impl From<LogConfig> for RuntimeLogConfig {
+    fn from(config: LogConfig) -> Self {
+        Self {
+            max_segment_size: (config.max_segment_size_mib * 1024.0 * 1024.0) as u64,
+            max_storage_size: (config.max_storage_size_gib * 1024.0 * 1024.0 * 1024.0) as u64,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]

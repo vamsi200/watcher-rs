@@ -7,6 +7,7 @@ use crate::ui::*;
 use crate::write::BatchInfo;
 use crate::write::LogConfig;
 use crate::write::PER_BATCH_SIZE;
+use crate::write::RuntimeLogConfig;
 use crate::write::log_path;
 use crate::write::prune_batch_info;
 use crate::write::read_batch;
@@ -174,7 +175,7 @@ pub async fn writer_thread(
     mut receiver: Receiver<UiEvent>,
     sender: &Sender<UiEvent>,
     batch_tx: Sender<bool>,
-    log_config: LogConfig,
+    log_config: RuntimeLogConfig,
 ) -> anyhow::Result<()> {
     let mut batch = Vec::with_capacity(PER_BATCH_SIZE);
     let mut batch_info = BatchInfo::default();

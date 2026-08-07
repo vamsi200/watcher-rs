@@ -9,15 +9,29 @@ pub mod write;
 use anyhow::Result;
 pub use bpfx::{file::*, network::*, process::*};
 use directories::ProjectDirs;
-use std::fs::{self, OpenOptions, create_dir, exists, read_link};
+use std::fs::{self, File, OpenOptions, create_dir, exists, read_link};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use crate::app::FILTEREVENTS;
 use crate::detection::Classified;
-use crate::write::index_path;
+use crate::write::{LogConfig, index_path};
 
 pub static STATE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| get_state_dir().unwrap());
+pub static CONFIG_DIR_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| get_config_dir().unwrap());
+
+fn get_config_dir() -> Result<Option<PathBuf>> {
+    let mut config_dir_path: Option<PathBuf> = None;
+    if let Some(prj_dir) = project_directory() {
+        let config_dir = prj_dir.config_dir();
+        if !exists(config_dir)? {
+            create_dir(config_dir)?;
+        }
+        config_dir_path = Some(config_dir.to_path_buf());
+    }
+    Ok(config_dir_path)
+}
 
 pub fn project_directory() -> Option<ProjectDirs> {
     ProjectDirs::from("com", "", env!("CARGO_PKG_NAME"))
@@ -37,9 +51,30 @@ pub fn get_state_dir() -> Result<Option<PathBuf>> {
     Ok(state_dir_path)
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+pub struct Config {
+    pub log_config: LogConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            log_config: LogConfig {
+                max_segment_size_mib: 1.0,
+                max_storage_size_gib: 0.5,
+            },
+        }
+    }
+}
+
+pub fn write_init_config(config: Config, file: &mut File) -> anyhow::Result<()> {
+    let toml = toml::to_string_pretty(&config)?;
+    file.write_all(toml.as_bytes())?;
+
+    Ok(())
+}
 pub fn init() -> anyhow::Result<()> {
     tracing::info!("truncating log and index file");
-
     let state_path = STATE_PATH
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("failed to find state path"))?;

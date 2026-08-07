@@ -15,7 +15,7 @@ use lru::LruCache;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, restore};
 use std::fs::{self, File, OpenOptions, create_dir, exists};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::{
@@ -34,9 +34,10 @@ use tokio::{
     signal::ctrl_c,
     sync::{mpsc::Sender, watch},
 };
+use toml::value;
 use watcher_rs::app::UiEvent;
 use watcher_rs::gen_db::{drop_privleges, parse_ipsum};
-use watcher_rs::write::LogConfig;
+use watcher_rs::write::{LogConfig, RuntimeLogConfig};
 use watcher_rs::*;
 use watcher_rs::{
     app::{App, writer_thread},
@@ -248,22 +249,56 @@ async fn read_events<'a>(
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
-    color_eyre::install().unwrap();
+    let config_path = CONFIG_DIR_PATH.as_ref().unwrap();
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(config_path.join("config.toml"))?;
+
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)?;
+
+    color_eyre::install()?;
     initialize_logging()?;
+
     let mut stdout = stdout();
-    let log_config = LogConfig {
-        max_segment_size: 1024 * 1024,
-        max_storage_size: 3 * 1024 * 1024,
-    };
 
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture,)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+    let log_config = match toml::from_str::<Config>(&buf) {
+        Ok(config) => config.log_config,
+        Err(_) => {
+            let config = Config::default();
+            write_init_config(config, &mut file).unwrap();
+            config.log_config
+        }
+    };
+
+    if !log_config.max_segment_size_mib.is_finite() || log_config.max_segment_size_mib <= 0.0 {
+        return Err(color_eyre::eyre::eyre!(
+            "max_segment_size_mib must be a finite value greater than 0"
+        ));
+    }
+
+    if !log_config.max_storage_size_gib.is_finite() || log_config.max_storage_size_gib <= 0.0 {
+        return Err(color_eyre::eyre::eyre!(
+            "max_storage_size_gib must be a finite value greater than 0"
+        ));
+    }
+
+    let runtime_log_config = RuntimeLogConfig::from(log_config);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AppEvent>(10000);
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-    let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<UiEvent>(10000);
-    let (batch_ready_tx, mut batch_ready_rx) = tokio::sync::mpsc::channel::<bool>(100);
-    let (live_mode_tx, mut live_mode_rx) = tokio::sync::mpsc::channel::<UiEvent>(10000);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let (writer_tx, writer_rx) = tokio::sync::mpsc::channel::<UiEvent>(10000);
+    let (batch_ready_tx, batch_ready_rx) = tokio::sync::mpsc::channel::<bool>(100);
+    let (live_mode_tx, live_mode_rx) = tokio::sync::mpsc::channel::<UiEvent>(10000);
+
+    let (writer_ready_tx, writer_ready_rx) = tokio::sync::oneshot::channel();
 
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -294,19 +329,30 @@ async fn main() -> color_eyre::Result<()> {
             state_path: STATE_PATH.as_ref(),
         };
 
-        if let Err(_) = drop_privleges() {
-            eprintln!("failed to drop privileges");
+        if let Err(e) = drop_privleges() {
+            eprintln!("failed to drop privileges: {e}");
         }
 
         init().unwrap();
+
+        let _ = writer_ready_tx.send(());
+
         let _runtime = bpf.run();
+
         if let Err(e) = read_events(tx, shutdown_rx, sources).await {
             eprintln!("{e}");
         }
     });
 
     tokio::spawn(async move {
-        if let Err(e) = writer_thread(writer_rx, &live_mode_tx, batch_ready_tx, log_config).await {
+        if writer_ready_rx.await.is_err() {
+            eprintln!("BPF initialization failed; writer exiting");
+            return;
+        }
+
+        if let Err(e) =
+            writer_thread(writer_rx, &live_mode_tx, batch_ready_tx, runtime_log_config).await
+        {
             eprintln!("{e}");
         }
     });
@@ -327,5 +373,6 @@ async fn main() -> color_eyre::Result<()> {
     .unwrap();
 
     restore();
+
     Ok(())
 }
