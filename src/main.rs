@@ -36,6 +36,7 @@ use tokio::{
 };
 use watcher_rs::app::UiEvent;
 use watcher_rs::gen_db::{drop_privleges, parse_ipsum};
+use watcher_rs::write::LogConfig;
 use watcher_rs::*;
 use watcher_rs::{
     app::{App, writer_thread},
@@ -250,6 +251,10 @@ async fn main() -> color_eyre::Result<()> {
     color_eyre::install().unwrap();
     initialize_logging()?;
     let mut stdout = stdout();
+    let log_config = LogConfig {
+        max_segment_size: 1024 * 1024,
+        max_storage_size: 3 * 1024 * 1024,
+    };
 
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture,)?;
@@ -301,7 +306,7 @@ async fn main() -> color_eyre::Result<()> {
     });
 
     tokio::spawn(async move {
-        if let Err(e) = writer_thread(writer_rx, &live_mode_tx, batch_ready_tx).await {
+        if let Err(e) = writer_thread(writer_rx, &live_mode_tx, batch_ready_tx, log_config).await {
             eprintln!("{e}");
         }
     });

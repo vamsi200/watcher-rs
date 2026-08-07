@@ -9,13 +9,13 @@ pub mod write;
 use anyhow::Result;
 pub use bpfx::{file::*, network::*, process::*};
 use directories::ProjectDirs;
-use std::fs::{OpenOptions, create_dir, exists, read_link};
+use std::fs::{self, OpenOptions, create_dir, exists, read_link};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use crate::app::FILTEREVENTS;
 use crate::detection::Classified;
-use crate::write::{index_path, log_path};
+use crate::write::index_path;
 
 pub static STATE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| get_state_dir().unwrap());
 
@@ -37,13 +37,26 @@ pub fn get_state_dir() -> Result<Option<PathBuf>> {
     Ok(state_dir_path)
 }
 
-pub fn init() -> color_eyre::Result<()> {
+pub fn init() -> anyhow::Result<()> {
     tracing::info!("truncating log and index file");
-    let _ = OpenOptions::new()
-        .truncate(true)
-        .write(true)
-        .create(true)
-        .open(log_path().unwrap());
+
+    let state_path = STATE_PATH
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("failed to find state path"))?;
+
+    for entry in fs::read_dir(state_path)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("events.bin."))
+        {
+            fs::remove_file(path)?;
+        }
+    }
+
     let _ = OpenOptions::new()
         .truncate(true)
         .write(true)

@@ -6,6 +6,7 @@ use std::{
     thread::panicking,
 };
 
+use anyhow::Result;
 use libc::locale_t;
 use rkyv::{
     Archive,
@@ -13,18 +14,28 @@ use rkyv::{
     de::Pool,
     rancor::{Error, Strategy},
     to_bytes,
+    util::AlignedVec,
 };
 use tokio::sync::mpsc::Sender;
 
-use crate::{AppEvent, PrivilegeEvent, ProcessEvent, STATE_PATH, SuspiciousEvent, app::UiEvent};
+use crate::{
+    AppEvent, PrivilegeEvent, ProcessEvent, STATE_PATH, SuspiciousEvent, app::UiEvent,
+    project_directory,
+};
 use bpfx::file::*;
 use bpfx::network::*;
 use bpfx::process::*;
 
 pub const PER_BATCH_SIZE: usize = 1000;
 
+pub struct LogConfig {
+    pub max_segment_size: u64,
+    pub max_storage_size: u64,
+}
+
 #[derive(Debug, Clone, Copy, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub struct BatchInfo {
+    pub segment_id: u64,
     pub file_offset: u64,
     pub count: usize,
 }
@@ -32,6 +43,7 @@ pub struct BatchInfo {
 impl Default for BatchInfo {
     fn default() -> Self {
         Self {
+            segment_id: 0,
             file_offset: 0,
             count: PER_BATCH_SIZE,
         }
@@ -42,7 +54,7 @@ pub fn log_path() -> anyhow::Result<PathBuf> {
     Ok(STATE_PATH
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("failed to find state path"))?
-        .join("events.bin"))
+        .join("events.bin.0"))
 }
 
 pub fn index_path() -> anyhow::Result<PathBuf> {
@@ -50,6 +62,24 @@ pub fn index_path() -> anyhow::Result<PathBuf> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("failed to find state path"))?
         .join("index.bin"))
+}
+
+pub fn prune_batch_info(segment_id: u64) -> anyhow::Result<()> {
+    tracing::info!("pruning old batch info of id - {}", segment_id);
+    let mut batch_info = read_batch_info()?;
+
+    let first_valid = batch_info
+        .iter()
+        .position(|info| info.segment_id > segment_id)
+        .unwrap_or(batch_info.len());
+
+    batch_info.drain(..first_valid);
+
+    for batch in batch_info {
+        write_batch_info_to_disk(batch)?;
+    }
+
+    Ok(())
 }
 
 pub fn write_batch_info_to_disk(info: BatchInfo) -> anyhow::Result<(), anyhow::Error> {
@@ -90,7 +120,9 @@ pub fn read_batch_info() -> anyhow::Result<Vec<BatchInfo>, anyhow::Error> {
 pub fn read_batch(batch: usize) -> anyhow::Result<Vec<UiEvent>> {
     tracing::info!("reading from disk..");
     let batch_info = read_batch_info()?;
-    let path = log_path()?;
+    let segment_id = batch_info[batch].segment_id;
+    let path = segment_path(segment_id);
+
     let mut file = File::open(path)?;
 
     let info = &batch_info[batch];
@@ -109,33 +141,21 @@ pub fn read_batch(batch: usize) -> anyhow::Result<Vec<UiEvent>> {
     Ok(output)
 }
 
-pub async fn write_to_disk(event: &Vec<UiEvent>) -> anyhow::Result<u64> {
-    let path = log_path()?;
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+pub fn serialize_event_data(event: &Vec<UiEvent>) -> Result<AlignedVec> {
+    Ok(to_bytes::<Error>(event)?)
+}
+
+pub fn segment_path(id: u64) -> PathBuf {
+    let path = STATE_PATH.as_ref().unwrap().clone();
+    path.join(format!("events.bin.{id}"))
+}
+
+pub fn write_to_disk(path: &PathBuf, bytes: AlignedVec) -> anyhow::Result<u64> {
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
     let start_offset = file.metadata()?.len();
-    let bytes = to_bytes::<Error>(event)?;
     file.write_all(&(bytes.len() as u32).to_le_bytes())?;
     file.write_all(&bytes)?;
     Ok(start_offset)
-}
-
-pub fn read_from_log(file_offset: u64) -> anyhow::Result<Vec<UiEvent>, anyhow::Error> {
-    let mut events = Vec::new();
-    let path = log_path()?;
-    let mut file = File::open(path)?;
-
-    file.seek(std::io::SeekFrom::Start(file_offset))?;
-
-    let mut len = [0u8; 4];
-    file.read_exact(&mut len)?;
-    let len = u32::from_le_bytes(len) as usize;
-    let mut content = vec![0; len];
-    file.read_exact(&mut content)?;
-
-    let event = rkyv::from_bytes::<Vec<UiEvent>, Error>(&content)?;
-    events.extend(event);
-
-    Ok(events)
 }
 
 #[test]

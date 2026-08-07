@@ -5,9 +5,14 @@ use crate::Severity;
 use crate::helper::format_timestamp_ns;
 use crate::ui::*;
 use crate::write::BatchInfo;
+use crate::write::LogConfig;
 use crate::write::PER_BATCH_SIZE;
+use crate::write::log_path;
+use crate::write::prune_batch_info;
 use crate::write::read_batch;
 use crate::write::read_batch_info;
+use crate::write::segment_path;
+use crate::write::serialize_event_data;
 use crate::write::write_batch_info_to_disk;
 use crate::write::write_to_disk;
 use anyhow::Result;
@@ -33,6 +38,7 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
@@ -168,25 +174,64 @@ pub async fn writer_thread(
     mut receiver: Receiver<UiEvent>,
     sender: &Sender<UiEvent>,
     batch_tx: Sender<bool>,
+    log_config: LogConfig,
 ) -> anyhow::Result<()> {
     let mut batch = Vec::with_capacity(PER_BATCH_SIZE);
     let mut batch_info = BatchInfo::default();
     let mut count = 0;
+    let mut path = log_path()?;
+    let mut segment_id = 0;
+    let mut total_size = 0;
+    let mut oldest_segment_id = 0;
 
     while let Some(event) = receiver.recv().await {
         sender.try_send(event.clone());
         batch.push(event);
 
         if batch.len() >= PER_BATCH_SIZE {
-            let start_offset = write_to_disk(&batch).await?;
+            let serialized_data = serialize_event_data(&batch)?;
+            let batch_size = 4 + serialized_data.len() as u64;
+
+            let mut file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+            if file_size > 0 && file_size + batch_size > log_config.max_segment_size {
+                segment_id += 1;
+                path = segment_path(segment_id);
+                file_size = 0;
+            }
+
+            let start_offset = write_to_disk(&path, serialized_data)?;
+            file_size += batch_size;
+            total_size += batch_size;
+
+            while total_size > log_config.max_storage_size && oldest_segment_id < segment_id {
+                let path = segment_path(oldest_segment_id);
+
+                let size = std::fs::metadata(&path)?.len();
+
+                tracing::info!(
+                    "exceeded set max_storage_size, removing old batch - {}",
+                    path.display()
+                );
+
+                std::fs::remove_file(&path)?;
+                prune_batch_info(oldest_segment_id)?;
+
+                total_size -= size;
+                oldest_segment_id += 1;
+            }
+
             count += 1;
             batch_info.file_offset = start_offset;
             batch_info.count = count;
+            batch_info.segment_id = segment_id;
+
             write_batch_info_to_disk(batch_info)?;
             batch_tx.send(true).await?;
             batch.clear();
         }
     }
+
     Ok(())
 }
 
