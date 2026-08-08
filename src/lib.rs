@@ -6,7 +6,6 @@ pub mod parser;
 pub mod ui;
 pub mod write;
 
-use anyhow::Result;
 pub use bpfx::{file::*, network::*, process::*};
 use directories::ProjectDirs;
 use std::fs::{self, File, OpenOptions, create_dir, exists, read_link};
@@ -21,7 +20,7 @@ use crate::write::{LogConfig, index_path};
 pub static STATE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| get_state_dir().unwrap());
 pub static CONFIG_DIR_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| get_config_dir().unwrap());
 
-fn get_config_dir() -> Result<Option<PathBuf>> {
+fn get_config_dir() -> color_eyre::eyre::Result<Option<PathBuf>> {
     let mut config_dir_path: Option<PathBuf> = None;
     if let Some(prj_dir) = project_directory() {
         let config_dir = prj_dir.config_dir();
@@ -37,7 +36,7 @@ pub fn project_directory() -> Option<ProjectDirs> {
     ProjectDirs::from("com", "", env!("CARGO_PKG_NAME"))
 }
 
-pub fn get_state_dir() -> Result<Option<PathBuf>> {
+pub fn get_state_dir() -> color_eyre::eyre::Result<Option<PathBuf>> {
     let mut state_dir_path: Option<PathBuf> = None;
     if let Some(prj_dir) = project_directory() {
         if let Some(state_dir) = prj_dir.state_dir() {
@@ -67,17 +66,17 @@ impl Default for Config {
     }
 }
 
-pub fn write_init_config(config: Config, file: &mut File) -> anyhow::Result<()> {
+pub fn write_init_config(config: Config, file: &mut File) -> color_eyre::eyre::Result<()> {
     let toml = toml::to_string_pretty(&config)?;
     file.write_all(toml.as_bytes())?;
 
     Ok(())
 }
-pub fn init() -> anyhow::Result<()> {
+pub fn init() -> color_eyre::eyre::Result<()> {
     tracing::info!("truncating log and index file");
     let state_path = STATE_PATH
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("failed to find state path"))?;
+        .ok_or_else(|| color_eyre::eyre::eyre!("failed to find state path"))?;
 
     for entry in fs::read_dir(state_path)? {
         let entry = entry?;

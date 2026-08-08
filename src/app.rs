@@ -16,7 +16,6 @@ use crate::write::segment_path;
 use crate::write::serialize_event_data;
 use crate::write::write_batch_info_to_disk;
 use crate::write::write_to_disk;
-use anyhow::Result;
 use color_eyre::config::FilterCallback;
 use crossterm::event::ModifierKeyCode;
 use crossterm::event::MouseButton;
@@ -176,7 +175,7 @@ pub async fn writer_thread(
     sender: &Sender<UiEvent>,
     batch_tx: Sender<bool>,
     log_config: RuntimeLogConfig,
-) -> anyhow::Result<()> {
+) -> color_eyre::Result<()> {
     let mut batch = Vec::with_capacity(PER_BATCH_SIZE);
     let mut batch_info = BatchInfo::default();
     let mut count = 0;
@@ -277,7 +276,7 @@ impl App {
         Self::default()
     }
 
-    fn ensure_batches_loaded(&mut self, global_selected: usize) -> anyhow::Result<()> {
+    fn ensure_batches_loaded(&mut self, global_selected: usize) -> color_eyre::Result<()> {
         if self.total_batches == 0 {
             return Ok(());
         }
@@ -299,7 +298,7 @@ impl App {
         self.load_batch_range(new_lo, new_hi)
     }
 
-    fn load_batch_range(&mut self, lo: usize, hi: usize) -> anyhow::Result<()> {
+    fn load_batch_range(&mut self, lo: usize, hi: usize) -> color_eyre::Result<()> {
         self.events.clear();
         self.filtered_events.clear();
 
@@ -321,7 +320,11 @@ impl App {
         Ok(())
     }
 
-    pub async fn push(&mut self, ev: AppEvent, writer_tx: &Sender<UiEvent>) -> anyhow::Result<()> {
+    pub async fn push(
+        &mut self,
+        ev: AppEvent,
+        writer_tx: &Sender<UiEvent>,
+    ) -> color_eyre::Result<()> {
         if self.event_name.is_empty() {
             self.event_name = "All";
         }
@@ -514,7 +517,10 @@ impl App {
                 }
             }
 
-            KeyCode::Char('q') => self.running = false,
+            KeyCode::Char('q') => {
+                tracing::info!("Pressed q");
+                self.running = false
+            }
             KeyCode::Char('t') => {
                 self.twle_hr_format = !self.twle_hr_format;
             }
@@ -542,14 +548,11 @@ impl App {
         mut self,
         mut terminal: DefaultTerminal,
         mut rx: Receiver<AppEvent>,
-        mut sh_tx: &watch::Sender<bool>,
-        mut writer_tx: &Sender<UiEvent>,
+        sh_tx: &watch::Sender<bool>,
+        writer_tx: &Sender<UiEvent>,
         mut batch_rx: Receiver<bool>,
         mut live_mode_rx: Receiver<UiEvent>,
     ) -> color_eyre::Result<()> {
-        let mut last_tick = std::time::Instant::now();
-        let tick_rate = Duration::from_millis(100);
-        let mut changed = false;
         let realtime_ns = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_nanos() as u64;
@@ -559,77 +562,90 @@ impl App {
 
         self.wallclock_offset_ns = realtime_ns - mono_ns;
 
-        while self.running {
-            while let Ok(event) = rx.try_recv() {
-                if !self.pause {
-                    self.push(event, &writer_tx).await;
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Event>(100);
+
+        std::thread::spawn(move || {
+            loop {
+                match event::read() {
+                    Ok(event) => {
+                        if input_tx.blocking_send(event).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("input error: {e}");
+                        break;
+                    }
                 }
             }
+        });
 
-            let mut changed = false;
-            while batch_rx.try_recv().is_ok() {
-                changed = true;
-                self.total_batches = read_batch_info().unwrap().len();
-            }
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
 
-            if self.follow_tail {
-                let mut added = false;
+        while self.running {
+            tokio::select! {
+                biased;
 
-                while let Ok(event) = live_mode_rx.try_recv() {
+                Some(event) = input_rx.recv() => {
+                    match event {
+                        Event::Key(key) => self.handle_key(key),
+                        Event::Mouse(mouse) => self.handle_mouse(mouse),
+                        _ => {}
+                    }
+                }
+
+                Some(event) = rx.recv() => {
+                    if !self.pause {
+                        self.push(event, writer_tx).await;
+                    }
+                }
+
+                Some(_) = batch_rx.recv() => {
+                    self.total_batches = read_batch_info().unwrap().len();
+                }
+
+                Some(event) = live_mode_rx.recv(), if self.follow_tail => {
                     let idx = self.events.len();
+
                     self.events.push(event);
 
                     if self.search_query.is_empty()
                         || match_query(&self.events[idx], &self.search_query)
                     {
                         self.filtered_events.push(idx);
+
+                        let last = self.filtered_events.len() - 1;
+
+                        self.stream_state.select(Some(last));
+
+                        self.view_port.window_start =
+                            last.saturating_sub(
+                                self.view_port.height.saturating_sub(1)
+                            );
+
+                        self.get_selected();
                     }
-
-                    added = true;
                 }
 
-                if added && !self.filtered_events.is_empty() {
-                    let last = self.filtered_events.len() - 1;
-
-                    self.stream_state.select(Some(last));
-                    self.view_port.window_start =
-                        last.saturating_sub(self.view_port.height.saturating_sub(1));
-                    self.get_selected();
-                }
-            }
-
-            if last_tick.elapsed() >= tick_rate {
-                terminal.draw(|frame| {
-                    render(frame, &mut self);
-                });
-                last_tick = Instant::now();
-            }
-
-            let timeout = tick_rate
-                .checked_sub(last_tick.elapsed())
-                .unwrap_or(Duration::ZERO);
-
-            if event::poll(timeout)? {
-                match event::read()? {
-                    Event::Key(key) => self.handle_key(key),
-                    Event::Mouse(mev) => self.handle_mouse(mev),
-                    _ => {}
+                _ = tick.tick() => {
+                    terminal.draw(|frame| {
+                        render(frame, &mut self);
+                    })?;
                 }
             }
         }
 
-        if !self.running {
-            execute!(
-                terminal.backend_mut(),
-                LeaveAlternateScreen,
-                DisableMouseCapture
-            )?;
-            sh_tx.send(true);
-        }
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+
+        tracing::info!("Sending shutdown");
+        sh_tx.send(true)?;
 
         Ok(())
     }
-
     pub fn scroll_up(&mut self) {
         let local = self.stream_state.selected().unwrap_or(0);
         let global = self.view_port.window_start + local;

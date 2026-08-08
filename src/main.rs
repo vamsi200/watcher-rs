@@ -1,5 +1,4 @@
 #![allow(unused)]
-use anyhow::Error;
 use bpfx::{
     Bpfx, FileEvent, FileFilter, FileMask, FileTypeFilter, NetworkEvent, NetworkFilter,
     NetworkMask, ProcessEvent, ProcessFilter, ProcessMask,
@@ -148,7 +147,7 @@ async fn read_events<'a>(
     tx: Sender<AppEvent>,
     mut sh_rx: watch::Receiver<bool>,
     mut sources: EventSources<'a>,
-) -> anyhow::Result<()> {
+) -> color_eyre::eyre::Result<()> {
     let mut file_event_filter = FileEventFilter::new();
     let mut classifier = Classifier::new();
 
@@ -298,8 +297,8 @@ fn start_collectors(
     writer_ready_tx: tokio::sync::oneshot::Sender<()>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     tx: tokio::sync::mpsc::Sender<AppEvent>,
-) -> color_eyre::Result<()> {
-    tokio::spawn(async move {
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn(async move {
         let mut bpf = Bpfx::new().unwrap();
 
         let process_filter = ProcessFilter {
@@ -332,14 +331,14 @@ fn start_collectors(
 
         let _ = writer_ready_tx.send(());
 
-        let _runtime = bpf.run();
+        let runtime = bpf.run();
 
         if let Err(e) = read_events(tx, shutdown_rx, sources).await {
             eprintln!("{e}");
         }
-    });
 
-    Ok(())
+        drop(runtime);
+    })
 }
 
 #[tokio::main]
@@ -403,9 +402,11 @@ async fn main() -> color_eyre::Result<()> {
 
     let (live_mode_tx, live_mode_rx) = tokio::sync::mpsc::channel::<UiEvent>(10_000);
 
-    let (writer_ready_tx, writer_ready_rx) = tokio::sync::oneshot::channel();
+    let (writer_ready_tx, writer_ready_rx) = tokio::sync::oneshot::channel::<()>();
 
-    start_collectors(writer_ready_tx, shutdown_rx, tx)?;
+    let collector_handle = start_collectors(writer_ready_tx, shutdown_rx, tx);
+
+    tracing::info!("collector spawned");
 
     tokio::spawn(async move {
         if writer_ready_rx.await.is_err() {
@@ -432,5 +433,7 @@ async fn main() -> color_eyre::Result<()> {
 
     start_ui(rx, &shutdown_tx, &writer_tx, batch_ready_rx, live_mode_rx).await?;
 
+    tracing::info!("MAIN ABOUT TO RETURN");
+    std::process::exit(0);
     Ok(())
 }

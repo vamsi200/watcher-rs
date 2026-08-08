@@ -1,8 +1,6 @@
 #![allow(unused)]
 use crate::helper::{bytes_to_str, is_root_only_path, parse_addr};
 use crate::*;
-use anyhow::Error;
-use anyhow::Result;
 use bpfx::NetworkEvent;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::{

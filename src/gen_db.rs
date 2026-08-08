@@ -9,7 +9,6 @@ use std::{
     sync::LazyLock,
 };
 
-use anyhow::Result;
 use directories::ProjectDirs;
 use libc::{setgid, setuid};
 use rkyv::{rancor::Error, to_bytes};
@@ -34,7 +33,7 @@ pub struct IpsumDb {
     pub v6: Box<[EntryV6]>,
 }
 
-pub fn drop_privleges() -> anyhow::Result<()> {
+pub fn drop_privleges() -> color_eyre::Result<()> {
     tracing::info!("dropping privileges..");
     let gid = std::env::var("SUDO_GID").ok();
     let uid = std::env::var("SUDO_UID").ok();
@@ -47,15 +46,15 @@ pub fn drop_privleges() -> anyhow::Result<()> {
             setuid(u32::from_str(&uid).unwrap());
         }
     } else {
-        return anyhow::bail!("Failed to get gid and uid");
+        return Err(color_eyre::eyre::eyre!("Failed to get gid and uid"));
     }
 
     Ok(())
 }
 
-pub fn parse_ipsum(path: Option<&PathBuf>, update: bool) -> anyhow::Result<()> {
+pub fn parse_ipsum(path: Option<&PathBuf>, update: bool) -> color_eyre::Result<()> {
     let Some(path) = path else {
-        anyhow::bail!("Failed to get state dir");
+        return Err(color_eyre::eyre::eyre!("Failed to get state dir"));
     };
 
     let mut ipsum_bin = path.join("ipsum.bin");
@@ -129,11 +128,11 @@ pub fn parse_ipsum(path: Option<&PathBuf>, update: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn update_ipsum_db() -> Result<bool> {
+pub fn update_ipsum_db() -> color_eyre::Result<bool> {
     println!("[INFO] updating ipsum db...");
 
     let Some(path) = STATE_PATH.as_ref() else {
-        anyhow::bail!("Failed to get state dir");
+        return Err(color_eyre::eyre::eyre!("Failed to get state dir"));
     };
 
     let ipsum_file = path.join("ipsum.txt");

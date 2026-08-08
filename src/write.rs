@@ -6,7 +6,6 @@ use std::{
     thread::panicking,
 };
 
-use anyhow::Result;
 use libc::locale_t;
 use rkyv::{
     Archive,
@@ -65,21 +64,21 @@ impl Default for BatchInfo {
     }
 }
 
-pub fn log_path() -> anyhow::Result<PathBuf> {
+pub fn log_path() -> color_eyre::Result<PathBuf> {
     Ok(STATE_PATH
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("failed to find state path"))?
+        .ok_or_else(|| color_eyre::eyre::eyre!("failed to find state path"))?
         .join("events.bin.0"))
 }
 
-pub fn index_path() -> anyhow::Result<PathBuf> {
+pub fn index_path() -> color_eyre::Result<PathBuf> {
     Ok(STATE_PATH
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("failed to find state path"))?
+        .ok_or_else(|| color_eyre::eyre::eyre!("failed to find state path"))?
         .join("index.bin"))
 }
 
-pub fn prune_batch_info(segment_id: u64) -> anyhow::Result<()> {
+pub fn prune_batch_info(segment_id: u64) -> color_eyre::Result<()> {
     tracing::info!("pruning old batch info of id - {}", segment_id);
     let mut batch_info = read_batch_info()?;
 
@@ -97,7 +96,9 @@ pub fn prune_batch_info(segment_id: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn write_batch_info_to_disk(info: BatchInfo) -> anyhow::Result<(), anyhow::Error> {
+pub fn write_batch_info_to_disk(
+    info: BatchInfo,
+) -> color_eyre::Result<(), color_eyre::eyre::Error> {
     let path = index_path()?;
 
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -109,7 +110,7 @@ pub fn write_batch_info_to_disk(info: BatchInfo) -> anyhow::Result<(), anyhow::E
     Ok(())
 }
 
-pub fn read_batch_info() -> anyhow::Result<Vec<BatchInfo>, anyhow::Error> {
+pub fn read_batch_info() -> color_eyre::Result<Vec<BatchInfo>, color_eyre::eyre::Error> {
     tracing::info!("called read_batch_info");
     let mut info = Vec::new();
     let path = index_path()?;
@@ -132,7 +133,7 @@ pub fn read_batch_info() -> anyhow::Result<Vec<BatchInfo>, anyhow::Error> {
     Ok(info)
 }
 
-pub fn read_batch(batch: usize) -> anyhow::Result<Vec<UiEvent>> {
+pub fn read_batch(batch: usize) -> color_eyre::Result<Vec<UiEvent>> {
     tracing::info!("reading from disk..");
     let batch_info = read_batch_info()?;
     let segment_id = batch_info[batch].segment_id;
@@ -156,7 +157,7 @@ pub fn read_batch(batch: usize) -> anyhow::Result<Vec<UiEvent>> {
     Ok(output)
 }
 
-pub fn serialize_event_data(event: &Vec<UiEvent>) -> Result<AlignedVec> {
+pub fn serialize_event_data(event: &Vec<UiEvent>) -> color_eyre::eyre::Result<AlignedVec> {
     Ok(to_bytes::<Error>(event)?)
 }
 
@@ -165,7 +166,7 @@ pub fn segment_path(id: u64) -> PathBuf {
     path.join(format!("events.bin.{id}"))
 }
 
-pub fn write_to_disk(path: &PathBuf, bytes: AlignedVec) -> anyhow::Result<u64> {
+pub fn write_to_disk(path: &PathBuf, bytes: AlignedVec) -> color_eyre::eyre::Result<u64> {
     let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
     let start_offset = file.metadata()?.len();
     file.write_all(&(bytes.len() as u32).to_le_bytes())?;
