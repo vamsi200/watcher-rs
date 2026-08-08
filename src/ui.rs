@@ -61,7 +61,7 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(18), // sidebar
+            Constraint::Length(22), // sidebar
             Constraint::Min(40),    // stream
             Constraint::Length(38), // more details part
         ])
@@ -282,9 +282,16 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let selected = app.sev_state.selected();
     app.sev_area = severity_area;
 
+    let count_width = counts
+        .iter()
+        .max()
+        .map(|count| count.to_string().len() as u16)
+        .unwrap_or(1);
+
     for (i, (_, label)) in SEVERITY_FILTERS.iter().enumerate() {
         let [left, right] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(4)]).areas(rows[i]);
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(count_width)])
+                .areas(rows[i]);
 
         let is_selected = selected == Some(i);
 
@@ -314,7 +321,9 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(Paragraph::new(left_line), left);
 
         frame.render_widget(
-            Paragraph::new(format!("{:>4}", counts[i])).style(Style::default().fg(C_MUTED)),
+            Paragraph::new(counts[i].to_string())
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(C_MUTED)),
             right,
         );
     }

@@ -536,6 +536,12 @@ impl App {
                 self.view_port.window_start = 0;
                 self.stream_state.select(None);
                 self.selected_event = None;
+
+                self.crit_ev_count = 0;
+                self.high_ev_count = 0;
+                self.med_ev_count = 0;
+                self.low_ev_count = 0;
+                self.info_ev_count = 0;
             }
             KeyCode::Char('p') => self.pause = !self.pause,
             _ => {
