@@ -4,6 +4,7 @@ use bpfx::{
     Bpfx, FileEvent, FileFilter, FileMask, FileTypeFilter, NetworkEvent, NetworkFilter,
     NetworkMask, ProcessEvent, ProcessFilter, ProcessMask,
 };
+use clap::Subcommand;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode};
@@ -28,6 +29,8 @@ use std::{
     thread::sleep,
     time::Duration,
 };
+use std::{path::PathBuf, sync::LazyLock};
+use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
 use tokio::{
     io::unix::AsyncFd,
@@ -36,7 +39,7 @@ use tokio::{
 };
 use toml::value;
 use watcher_rs::app::UiEvent;
-use watcher_rs::gen_db::{drop_privleges, parse_ipsum};
+use watcher_rs::gen_db::{drop_privleges, parse_ipsum, update_ipsum_db};
 use watcher_rs::write::{LogConfig, RuntimeLogConfig};
 use watcher_rs::*;
 use watcher_rs::{
@@ -44,13 +47,25 @@ use watcher_rs::{
     helper::format_timestamp_ns,
 };
 
-use std::{path::PathBuf, sync::LazyLock};
-
+use clap::Parser;
 use color_eyre::eyre::{Context, Result};
 use directories::ProjectDirs;
 use tracing::error;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{self, Layer, layer::SubscriberExt, util::SubscriberInitExt};
+
+#[derive(Parser, Debug)]
+#[command(name = "watcher-rs", version, about)]
+struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Update the ipsum database
+    UpdateDb,
+}
 
 struct EventSources<'a> {
     process: PollProcess,
@@ -247,63 +262,43 @@ async fn read_events<'a>(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> color_eyre::Result<()> {
-    let config_path = CONFIG_DIR_PATH.as_ref().unwrap();
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(config_path.join("config.toml"))?;
-
-    let mut buf = String::new();
-    file.read_to_string(&mut buf)?;
-
-    color_eyre::install()?;
-    initialize_logging()?;
-
+async fn start_ui(
+    mut rx: Receiver<AppEvent>,
+    shutdown_tx: &tokio::sync::watch::Sender<bool>,
+    writer_tx: &tokio::sync::mpsc::Sender<UiEvent>,
+    mut batch_ready_rx: tokio::sync::mpsc::Receiver<bool>,
+    mut live_mode_rx: tokio::sync::mpsc::Receiver<UiEvent>,
+) -> color_eyre::Result<()> {
     let mut stdout = stdout();
 
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
-    let log_config = match toml::from_str::<Config>(&buf) {
-        Ok(config) => config.log_config,
-        Err(_) => {
-            let config = Config::default();
-            write_init_config(config, &mut file).unwrap();
-            config.log_config
-        }
-    };
-
-    if !log_config.max_segment_size_mib.is_finite() || log_config.max_segment_size_mib <= 0.0 {
-        return Err(color_eyre::eyre::eyre!(
-            "max_segment_size_mib must be a finite value greater than 0"
-        ));
-    }
-
-    if !log_config.max_storage_size_gib.is_finite() || log_config.max_storage_size_gib <= 0.0 {
-        return Err(color_eyre::eyre::eyre!(
-            "max_storage_size_gib must be a finite value greater than 0"
-        ));
-    }
-
-    let runtime_log_config = RuntimeLogConfig::from(log_config);
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<AppEvent>(10000);
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-    let (writer_tx, writer_rx) = tokio::sync::mpsc::channel::<UiEvent>(10000);
-    let (batch_ready_tx, batch_ready_rx) = tokio::sync::mpsc::channel::<bool>(100);
-    let (live_mode_tx, live_mode_rx) = tokio::sync::mpsc::channel::<UiEvent>(10000);
-
-    let (writer_ready_tx, writer_ready_rx) = tokio::sync::oneshot::channel();
-
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     let mut app = App::new();
 
+    app.run(
+        terminal,
+        rx,
+        shutdown_tx,
+        writer_tx,
+        batch_ready_rx,
+        live_mode_rx,
+    )
+    .await
+    .unwrap();
+
+    restore();
+
+    Ok(())
+}
+
+fn start_collectors(
+    writer_ready_tx: tokio::sync::oneshot::Sender<()>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    tx: tokio::sync::mpsc::Sender<AppEvent>,
+) -> color_eyre::Result<()> {
     tokio::spawn(async move {
         let mut bpf = Bpfx::new().unwrap();
 
@@ -344,6 +339,74 @@ async fn main() -> color_eyre::Result<()> {
         }
     });
 
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> color_eyre::Result<()> {
+    color_eyre::install()?;
+    initialize_logging()?;
+
+    let args = Args::parse();
+
+    match args.command {
+        Some(Command::UpdateDb) => {
+            update_ipsum_db().unwrap();
+            return Ok(());
+        }
+        None => {}
+    }
+
+    let config_path = CONFIG_DIR_PATH
+        .as_ref()
+        .ok_or_else(|| color_eyre::eyre::eyre!("Failed to get config directory"))?;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(config_path.join("config.toml"))?;
+
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)?;
+
+    let log_config = match toml::from_str::<Config>(&buf) {
+        Ok(config) => config.log_config,
+        Err(_) => {
+            let config = Config::default();
+            write_init_config(config, &mut file).unwrap();
+            config.log_config
+        }
+    };
+
+    if !log_config.max_segment_size_mib.is_finite() || log_config.max_segment_size_mib <= 0.0 {
+        return Err(color_eyre::eyre::eyre!(
+            "max_segment_size_mib must be a finite value greater than 0"
+        ));
+    }
+
+    if !log_config.max_storage_size_gib.is_finite() || log_config.max_storage_size_gib <= 0.0 {
+        return Err(color_eyre::eyre::eyre!(
+            "max_storage_size_gib must be a finite value greater than 0"
+        ));
+    }
+
+    let runtime_log_config = RuntimeLogConfig::from(log_config);
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<AppEvent>(10_000);
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let (writer_tx, writer_rx) = tokio::sync::mpsc::channel::<UiEvent>(10_000);
+
+    let (batch_ready_tx, batch_ready_rx) = tokio::sync::mpsc::channel::<bool>(100);
+
+    let (live_mode_tx, live_mode_rx) = tokio::sync::mpsc::channel::<UiEvent>(10_000);
+
+    let (writer_ready_tx, writer_ready_rx) = tokio::sync::oneshot::channel();
+
+    start_collectors(writer_ready_tx, shutdown_rx, tx)?;
+
     tokio::spawn(async move {
         if writer_ready_rx.await.is_err() {
             eprintln!("BPF initialization failed; writer exiting");
@@ -353,26 +416,21 @@ async fn main() -> color_eyre::Result<()> {
         if let Err(e) =
             writer_thread(writer_rx, &live_mode_tx, batch_ready_tx, runtime_log_config).await
         {
-            eprintln!("{e}");
+            eprintln!("writer failed: {e}");
         }
     });
 
     tokio::spawn(async move {
-        let _ = tokio::task::spawn_blocking(move || parse_ipsum(STATE_PATH.as_ref())).await;
+        if let Err(e) = tokio::task::spawn_blocking(|| {
+            parse_ipsum(STATE_PATH.as_ref(), false);
+        })
+        .await
+        {
+            eprintln!("failed to parse ipsum database: {e}");
+        }
     });
 
-    app.run(
-        terminal,
-        rx,
-        shutdown_tx,
-        writer_tx,
-        batch_ready_rx,
-        live_mode_rx,
-    )
-    .await
-    .unwrap();
-
-    restore();
+    start_ui(rx, &shutdown_tx, &writer_tx, batch_ready_rx, live_mode_rx).await?;
 
     Ok(())
 }

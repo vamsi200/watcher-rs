@@ -1,16 +1,20 @@
 #![allow(unused)]
 use std::{
-    fs::{self, File, OpenOptions, create_dir, exists},
+    fs::{self, File, OpenOptions, create_dir, exists, remove_file},
     io::{BufRead, BufReader, Write},
     net::IpAddr,
     path::{Path, PathBuf},
+    process::Command,
     str::FromStr,
     sync::LazyLock,
 };
 
+use anyhow::Result;
 use directories::ProjectDirs;
 use libc::{setgid, setuid};
 use rkyv::{rancor::Error, to_bytes};
+
+use crate::STATE_PATH;
 
 #[derive(rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub struct EntryV4 {
@@ -49,13 +53,18 @@ pub fn drop_privleges() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn parse_ipsum(path: Option<&PathBuf>) -> anyhow::Result<()> {
+pub fn parse_ipsum(path: Option<&PathBuf>, update: bool) -> anyhow::Result<()> {
     let Some(path) = path else {
         anyhow::bail!("Failed to get state dir");
     };
 
     let mut ipsum_bin = path.join("ipsum.bin");
-    if exists(&ipsum_bin)? {
+    let exists = exists(&ipsum_bin)?;
+
+    if update && exists {
+        remove_file(&ipsum_bin);
+    }
+    if !update && exists {
         return Ok(());
     }
 
@@ -118,4 +127,43 @@ pub fn parse_ipsum(path: Option<&PathBuf>) -> anyhow::Result<()> {
     ipsum_bin.write_all(&bytes);
 
     Ok(())
+}
+
+pub fn update_ipsum_db() -> Result<bool> {
+    println!("[INFO] updating ipsum db...");
+
+    let Some(path) = STATE_PATH.as_ref() else {
+        anyhow::bail!("Failed to get state dir");
+    };
+
+    let ipsum_file = path.join("ipsum.txt");
+
+    if ipsum_file.exists() {
+        remove_file(&ipsum_file)?;
+    }
+
+    let url = "https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt";
+
+    println!(
+        "[INFO] Running command - `wget -O {} {}`",
+        ipsum_file.display(),
+        url
+    );
+
+    let status = Command::new("wget")
+        .args(["-q", "-O", ipsum_file.to_str().unwrap(), url])
+        .status()?;
+
+    if status.success() {
+        println!("[INFO] Parsing `ipsum.txt` and creating `ipsum.bin`");
+        parse_ipsum(Some(path), true);
+        println!("[DONE] created `ipsum.bin`");
+        return Ok(true);
+    } else {
+        println!("[ERROR] Failed to download ipsum.txt");
+    }
+
+    println!("[ERROR] Failed to download ipsum.txt");
+
+    Ok(false)
 }

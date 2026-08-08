@@ -542,8 +542,8 @@ impl App {
         mut self,
         mut terminal: DefaultTerminal,
         mut rx: Receiver<AppEvent>,
-        mut sh_tx: watch::Sender<bool>,
-        mut writer_tx: Sender<UiEvent>,
+        mut sh_tx: &watch::Sender<bool>,
+        mut writer_tx: &Sender<UiEvent>,
         mut batch_rx: Receiver<bool>,
         mut live_mode_rx: Receiver<UiEvent>,
     ) -> color_eyre::Result<()> {
