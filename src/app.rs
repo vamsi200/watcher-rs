@@ -16,6 +16,7 @@ use crate::write::segment_path;
 use crate::write::serialize_event_data;
 use crate::write::write_batch_info_to_disk;
 use crate::write::write_to_disk;
+use clap::value_parser;
 use color_eyre::config::FilterCallback;
 use crossterm::event::ModifierKeyCode;
 use crossterm::event::MouseButton;
@@ -39,6 +40,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
+use std::process::id;
 use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
@@ -94,7 +96,6 @@ pub struct App {
     pub search_query: String,
     pub pause: bool,
     pub event_idx: usize,
-    pub event_name: &'static str,
     pub g_char: bool,
     pub twle_hr_format: bool,
     pub wallclock_offset_ns: u64,
@@ -110,6 +111,8 @@ pub struct App {
     pub loaded_range: (usize, usize),
     pub total_batches: usize,
     pub follow_tail: bool,
+    pub selected_filters: Vec<bool>,
+    pub selected_sevs: Vec<bool>,
 }
 
 #[derive(Debug)]
@@ -147,7 +150,6 @@ impl Default for App {
             search_query: String::new(),
             pause: false,
             event_idx: 0,
-            event_name: "",
             g_char: false,
             twle_hr_format: false,
             wallclock_offset_ns: 0,
@@ -166,6 +168,8 @@ impl Default for App {
             total_batches: 0,
             follow_tail: false,
             sev_area: Rect::default(),
+            selected_filters: vec![false; FILTEREVENTS.len()],
+            selected_sevs: vec![false; SEVERITY_FILTERS.len()],
         }
     }
 }
@@ -261,8 +265,7 @@ fn row_at_stream(app: &App, col: u16, row: u16) -> Option<usize> {
     (idx < app.filtered_events.len()).then_some(idx)
 }
 
-pub const FILTEREVENTS: [&str; 7] = [
-    "All",
+pub const FILTEREVENTS: [&str; 6] = [
     "ProcessStart",
     "ProcessExit",
     "FileOpen",
@@ -325,24 +328,31 @@ impl App {
         ev: AppEvent,
         writer_tx: &Sender<UiEvent>,
     ) -> color_eyre::Result<()> {
-        if self.event_name.is_empty() {
-            self.event_name = "All";
-        }
+        let has_filters = self.selected_filters.iter().any(|&x| x);
 
-        let filter = ev.matches_filter(self.filter_state.selected().unwrap_or(0));
-        self.event_name = filter.1;
+        let filter = !has_filters
+            || self
+                .selected_filters
+                .iter()
+                .enumerate()
+                .any(|(idx, selected)| *selected && ev.matches_filter(idx));
 
-        if !filter.0 {
+        if !filter {
             return Ok(());
         }
 
         let ev = UiEvent::new(ev, self.twle_hr_format, self.wallclock_offset_ns);
 
-        if self
-            .sev_state
-            .selected()
-            .is_none_or(|i| ev.severity == SEVERITY_FILTERS[i].0)
-        {
+        let has_sev_filters = self.selected_sevs.iter().any(|&x| x);
+
+        let sev_filter = !has_sev_filters
+            || self
+                .selected_sevs
+                .iter()
+                .enumerate()
+                .any(|(idx, sel)| *sel && ev.severity == SEVERITY_FILTERS[idx].0);
+
+        if sev_filter {
             match ev.event.severity() {
                 Severity::Critical => self.crit_ev_count += 1,
                 Severity::High => self.high_ev_count += 1,
@@ -412,11 +422,8 @@ impl App {
                     mouse.row,
                     SEVERITY_FILTERS.len(),
                 ) {
-                    if self.sev_state.selected() == Some(idx) {
-                        self.sev_state.select(None);
-                    } else {
-                        self.sev_state.select(Some(idx));
-                    }
+                    self.selected_sevs[idx] = !self.selected_sevs[idx];
+                    self.sev_state.select(Some(idx));
                 }
                 if let Some(idx) = row_at(
                     self.filter_area,
@@ -424,11 +431,8 @@ impl App {
                     mouse.row,
                     FILTEREVENTS.len(),
                 ) {
-                    if self.filter_state.selected() == Some(idx) {
-                        self.filter_state.select(None);
-                    } else {
-                        self.filter_state.select(Some(idx));
-                    }
+                    self.selected_filters[idx] = !self.selected_filters[idx];
+                    self.filter_state.select(Some(idx));
                 }
                 if let Some(idx) = row_at_stream(self, mouse.column, mouse.row) {
                     self.stream_state.select(Some(idx));

@@ -199,20 +199,17 @@ impl AppEvent {
             AppEvent::NetworkConnect(_) => EventType::ConnectEvent,
         }
     }
-    pub fn matches_filter(&self, filter_idx: usize) -> (bool, &'static str) {
+
+    pub fn matches_filter(&self, filter_idx: usize) -> bool {
         let val = FILTEREVENTS[filter_idx];
         match val {
-            "All" => (true, "All"),
-            "FileOpen" => (matches!(self, AppEvent::FileOpen(_)), "FileOpen"),
-            "FileClose" => (matches!(self, AppEvent::FileClose(_)), "FileClose"),
-            "NetworkAccept" => (matches!(self, AppEvent::NetworkAccept(_)), "NetworkAccept"),
-            "ProcessStart" => (matches!(self, AppEvent::ProcessStart(_)), "ProcessStart"),
-            "ProcessExit" => (matches!(self, AppEvent::ProcessExit(_)), "ProcessExit"),
-            "NetworkConnect" => (
-                matches!(self, AppEvent::NetworkConnect(_)),
-                "NetworkConnect",
-            ),
-            _ => (false, "None"),
+            "FileOpen" => matches!(self, AppEvent::FileOpen(_)),
+            "FileClose" => matches!(self, AppEvent::FileClose(_)),
+            "NetworkAccept" => matches!(self, AppEvent::NetworkAccept(_)),
+            "ProcessStart" => matches!(self, AppEvent::ProcessStart(_)),
+            "ProcessExit" => matches!(self, AppEvent::ProcessExit(_)),
+            "NetworkConnect" => matches!(self, AppEvent::NetworkConnect(_)),
+            _ => false,
         }
     }
 

@@ -228,7 +228,6 @@ fn detail_color(event: &UiEvent) -> Color {
     }
 }
 
-// later maybe add like grouping..
 pub const SEVERITY_FILTERS: &[(Severity, &str); 5] = &[
     (Severity::Info, "Info"),
     (Severity::Critical, "Critical"),
@@ -293,7 +292,7 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             Layout::horizontal([Constraint::Min(0), Constraint::Length(count_width)])
                 .areas(rows[i]);
 
-        let is_selected = selected == Some(i);
+        let is_selected = app.selected_sevs[i];
 
         let marker = if is_selected { "▶" } else { "▸" };
 
@@ -340,8 +339,7 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, event)| {
-            let selected = Some(idx) == selected;
-
+            let selected = app.selected_filters[idx];
             let marker = if selected { "▶" } else { "▸" };
 
             ListItem::new(Line::from(vec![
@@ -693,8 +691,6 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Focus::Filter => "FILTER",
     };
 
-    let filter_label = &app.event_name;
-
     let spans = Line::from(vec![
         Span::styled(
             format!(" {mode} "),
@@ -722,10 +718,6 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(" back/dismiss  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("q"),
         Span::styled(" quit", Style::default().fg(C_MUTED).bg(C_BG2)),
-        Span::styled(
-            format!("   Selected [{filter_label}]"),
-            Style::default().fg(C_MUTED).bg(C_BG2),
-        ),
     ]);
 
     frame.render_widget(
