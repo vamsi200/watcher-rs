@@ -157,7 +157,12 @@ async fn read_events<'a>(
         None
     };
 
+    let rule_config = write_sensitive_path_config().unwrap();
+
     classifier.ipsum_file_bytes = file_bytes;
+    tracing::info!("rules len: {:?}", rule_config.sensitive_path);
+
+    classifier.rules = Some(rule_config);
 
     loop {
         tokio::select! {
@@ -327,9 +332,9 @@ fn start_collectors(
             eprintln!("failed to drop privileges: {e}");
         }
 
-        init().unwrap();
+        writer_ready_tx.send(());
 
-        let _ = writer_ready_tx.send(());
+        init().unwrap();
 
         let runtime = bpf.run();
 
@@ -356,42 +361,6 @@ async fn main() -> color_eyre::Result<()> {
         None => {}
     }
 
-    let config_path = CONFIG_DIR_PATH
-        .as_ref()
-        .ok_or_else(|| color_eyre::eyre::eyre!("Failed to get config directory"))?;
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(config_path.join("config.toml"))?;
-
-    let mut buf = String::new();
-    file.read_to_string(&mut buf)?;
-
-    let log_config = match toml::from_str::<Config>(&buf) {
-        Ok(config) => config.log_config,
-        Err(_) => {
-            let config = Config::default();
-            write_init_config(config, &mut file).unwrap();
-            config.log_config
-        }
-    };
-
-    if !log_config.max_segment_size_mib.is_finite() || log_config.max_segment_size_mib <= 0.0 {
-        return Err(color_eyre::eyre::eyre!(
-            "max_segment_size_mib must be a finite value greater than 0"
-        ));
-    }
-
-    if !log_config.max_storage_size_gib.is_finite() || log_config.max_storage_size_gib <= 0.0 {
-        return Err(color_eyre::eyre::eyre!(
-            "max_storage_size_gib must be a finite value greater than 0"
-        ));
-    }
-
-    let runtime_log_config = RuntimeLogConfig::from(log_config);
-
     let (tx, rx) = tokio::sync::mpsc::channel::<AppEvent>(10_000);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -408,6 +377,8 @@ async fn main() -> color_eyre::Result<()> {
 
     tracing::info!("collector spawned");
 
+    let runtime_log_config = RuntimeLogConfig::from(get_log_config().unwrap());
+
     tokio::spawn(async move {
         if writer_ready_rx.await.is_err() {
             eprintln!("BPF initialization failed; writer exiting");
@@ -418,6 +389,7 @@ async fn main() -> color_eyre::Result<()> {
             writer_thread(writer_rx, &live_mode_tx, batch_ready_tx, runtime_log_config).await
         {
             eprintln!("writer failed: {e}");
+            return;
         }
     });
 

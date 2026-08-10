@@ -8,17 +8,143 @@ pub mod write;
 
 pub use bpfx::{file::*, network::*, process::*};
 use directories::ProjectDirs;
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, create_dir, exists, read_link};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use crate::app::FILTEREVENTS;
-use crate::detection::Classified;
+use crate::detection::{
+    Classified, PATH_SEVERITY, Rules, SUSPICIOUS_EXEC_PATHS, SUSPICIOUS_PORTS, SensitivePathConfig,
+    SuspiciousExecPathConfig, SuspiciousPortsConfig,
+};
 use crate::write::{LogConfig, index_path};
 
 pub static STATE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| get_state_dir().unwrap());
 pub static CONFIG_DIR_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| get_config_dir().unwrap());
+
+pub fn get_log_config() -> color_eyre::eyre::Result<LogConfig> {
+    let mut file = open_config_file().unwrap();
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)?;
+
+    tracing::info!("writing to config.");
+    let log_config = match toml::from_str::<Config>(&buf) {
+        Ok(config) => config.log_config,
+        Err(_) => {
+            let config = Config::default();
+            write_init_config(&config.log_config, &mut file).unwrap();
+            config.log_config
+        }
+    };
+
+    if !log_config.max_segment_size_mib.is_finite() || log_config.max_segment_size_mib <= 0.0 {
+        return Err(color_eyre::eyre::eyre!(
+            "max_segment_size_mib must be a finite value greater than 0"
+        ));
+    }
+
+    if !log_config.max_storage_size_gib.is_finite() || log_config.max_storage_size_gib <= 0.0 {
+        return Err(color_eyre::eyre::eyre!(
+            "max_storage_size_gib must be a finite value greater than 0"
+        ));
+    }
+
+    Ok(log_config)
+}
+
+pub fn open_config_file() -> color_eyre::eyre::Result<File> {
+    let config_path = CONFIG_DIR_PATH
+        .as_ref()
+        .ok_or_else(|| color_eyre::eyre::eyre!("Failed to get config directory"))?;
+
+    Ok(OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(config_path.join("config.toml"))?)
+}
+
+pub fn open_rules_file() -> color_eyre::eyre::Result<File> {
+    let config_path = CONFIG_DIR_PATH
+        .as_ref()
+        .ok_or_else(|| color_eyre::eyre::eyre!("Failed to get config directory"))?;
+
+    Ok(OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(config_path.join("rules.toml"))?)
+}
+
+pub static RULE_CONFIG: LazyLock<Rules> = LazyLock::new(|| write_sensitive_path_config().unwrap());
+
+pub fn write_sensitive_path_config() -> color_eyre::eyre::Result<Rules> {
+    let mut file = open_rules_file().unwrap();
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)?;
+
+    let mut sensitivie_paths = std::collections::BTreeMap::new();
+    let mut sus_exec_paths = BTreeMap::new();
+    let mut sus_ports = BTreeMap::new();
+
+    for (path, severity) in PATH_SEVERITY {
+        sensitivie_paths
+            .entry(*severity)
+            .or_insert_with(Vec::new)
+            .push((*path).to_string());
+    }
+
+    for (path, severity) in SUSPICIOUS_EXEC_PATHS {
+        sus_exec_paths
+            .entry(*severity)
+            .or_insert_with(Vec::new)
+            .push((*path).to_string());
+    }
+
+    for (pids, severity) in SUSPICIOUS_PORTS {
+        sus_ports
+            .entry(*severity)
+            .or_insert_with(Vec::new)
+            .push(*pids);
+    }
+
+    let sp_config = SensitivePathConfig {
+        enabled: true,
+        paths: sensitivie_paths,
+    };
+
+    let sus_exec_config = SuspiciousExecPathConfig {
+        enabled: true,
+        paths: sus_exec_paths,
+    };
+
+    let sus_port_config = SuspiciousPortsConfig {
+        enabled: true,
+        ports: sus_ports,
+    };
+
+    let config = Rules {
+        sensitive_path: Some(sp_config),
+        suspicious_exec_path: Some(sus_exec_config),
+        suspicious_ports: Some(sus_port_config),
+    };
+
+    let toml = toml::to_string_pretty(&config)?;
+    let rule_config = if buf.trim().is_empty() {
+        file.seek(SeekFrom::Start(0))?;
+        file.set_len(0)?;
+        file.write_all(toml.as_bytes())?;
+
+        config
+    } else {
+        toml::from_str::<Rules>(&buf)
+            .map_err(|e| color_eyre::eyre::eyre!("invalid rules.toml: {e}"))?
+    };
+
+    Ok(rule_config)
+}
 
 fn get_config_dir() -> color_eyre::eyre::Result<Option<PathBuf>> {
     let mut config_dir_path: Option<PathBuf> = None;
@@ -50,7 +176,7 @@ pub fn get_state_dir() -> color_eyre::eyre::Result<Option<PathBuf>> {
     Ok(state_dir_path)
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct Config {
     pub log_config: LogConfig,
 }
@@ -66,7 +192,7 @@ impl Default for Config {
     }
 }
 
-pub fn write_init_config(config: Config, file: &mut File) -> color_eyre::eyre::Result<()> {
+pub fn write_init_config(config: &LogConfig, file: &mut File) -> color_eyre::eyre::Result<()> {
     let toml = toml::to_string_pretty(&config)?;
     file.write_all(toml.as_bytes())?;
 
@@ -145,6 +271,8 @@ pub struct SuspiciousEvent {
     Eq,
     Ord,
     Hash,
+    serde::Deserialize,
+    serde::Serialize,
 )]
 pub enum Severity {
     Info,
@@ -257,14 +385,13 @@ impl AppEvent {
         }
     }
 
-    // just for testing..
     pub fn severity(&self) -> Severity {
         match self {
             AppEvent::FileOpen(e) => e.severity,
             AppEvent::NetworkAccept(e) => e.severity,
-            AppEvent::ProcessStart(_) => Severity::Low,
-            AppEvent::ProcessExit(_) => Severity::Info,
-            AppEvent::FileClose(_) => Severity::Info,
+            AppEvent::ProcessStart(e) => e.severity,
+            AppEvent::ProcessExit(e) => e.severity,
+            AppEvent::FileClose(e) => e.severity,
             AppEvent::NetworkConnect(e) => e.severity,
         }
     }

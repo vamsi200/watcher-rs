@@ -5,11 +5,12 @@ use crate::*;
 use crate::{PrivilegeEvent, Severity, helper::is_sensitive_path};
 use bpfx::EventHeader;
 use bpfx::{FileEvent, process::ProcessStartEvent};
+use clap::builder::Str;
 use futures::lock::Mutex;
 use libc::O_TRUNC;
 use lru::LruCache;
 use rkyv::rancor::Error;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
@@ -20,6 +21,7 @@ use std::{
     fs::{self, File},
     path::{self, PathBuf},
 };
+use tracing_subscriber::Layer;
 
 macro_rules! impl_file_header {
     () => {
@@ -192,20 +194,24 @@ macro_rules! classify {
 }
 
 macro_rules! classify_classifier {
-    ($fn_name:ident, $event:ty, $need_bytes:literal) => {
+    ($fn_name:ident, $event:ty) => {
         pub fn $fn_name(&self, event: $event) -> Classified<$event> {
             let ctx = RuleContext {
                 process_cache: &self.process_map,
-                ipsum_bytes: if $need_bytes {
-                    self.ipsum_file_bytes.as_deref()
-                } else {
-                    None
-                },
+                ipsum_bytes: self.ipsum_file_bytes.as_deref(),
+                rules_config: self.rules.as_ref(),
             };
 
             self.engine.$fn_name(event, ctx)
         }
     };
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct Rules {
+    pub sensitive_path: Option<SensitivePathConfig>,
+    pub suspicious_exec_path: Option<SuspiciousExecPathConfig>,
+    pub suspicious_ports: Option<SuspiciousPortsConfig>,
 }
 
 pub struct FileEventFilter {
@@ -343,7 +349,7 @@ const SUSPICIOUS_FLAGS: &[(i32, &str)] = &[
     (libc::O_WRONLY | libc::O_APPEND, "appending to file"),
 ];
 
-const SUSPICIOUS_PORTS: &[(u16, Severity)] = &[
+pub const SUSPICIOUS_PORTS: &[(u16, Severity)] = &[
     (23, Severity::Medium),
     (512, Severity::High),
     (513, Severity::High),
@@ -412,6 +418,7 @@ const SUSPICIOUS_INPUT_FLAGS: &[(i32, &str)] = &[
 pub struct RuleContext<'a> {
     pub process_cache: &'a HashMap<u32, ProcessInfo>,
     pub ipsum_bytes: Option<&'a [u8]>,
+    pub rules_config: Option<&'a Rules>,
 }
 
 #[derive(
@@ -532,28 +539,31 @@ impl HasRetval for FileDeleteEvent {
 generic_file_impl!(FileReadEvent, impl_file_retval_read);
 generic_file_impl!(FileWriteEvent, impl_file_retval_read);
 
-pub struct SensitivePathRule;
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SensitivePathConfig {
+    pub enabled: bool,
+    pub paths: BTreeMap<Severity, Vec<String>>,
+}
 
-impl SensitivePathRule {
-    fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
+impl SensitivePathConfig {
+    fn check<T>(&self, event: &T, ctx: &RuleContext) -> Option<Severity>
     where
         T: HasFilePath,
     {
-        PATH_SEVERITY
-            .iter()
-            .filter_map(|(name, sev)| {
-                if event.file_path().starts_with(name) {
-                    Some(sev)
-                } else {
-                    None
-                }
-            })
-            .next()
-            .copied()
+        let config = ctx
+            .rules_config
+            .and_then(|rules| rules.sensitive_path.as_ref())?;
+
+        config.paths.iter().find_map(|(severity, paths)| {
+            paths
+                .iter()
+                .any(|path| event.file_path().starts_with(path))
+                .then_some(*severity)
+        })
     }
 }
 
-impl Rule for SensitivePathRule {
+impl Rule for SensitivePathConfig {
     fn name(&self) -> &'static str {
         "SensitivePath"
     }
@@ -641,6 +651,7 @@ pub struct Classifier {
     pub ipsum_file_bytes: Option<Vec<u8>>,
     pub process_map: HashMap<u32, ProcessInfo>, //TODO: unimplemented!()
     pub engine: RuleEngine,
+    pub rules: Option<Rules>,
 }
 
 impl Classifier {
@@ -652,35 +663,45 @@ impl Classifier {
                 rules: vec![
                     Box::new(TempExecutableRule),
                     Box::new(RootWriteRule),
-                    Box::new(SensitivePathRule),
+                    Box::new(SensitivePathConfig {
+                        enabled: true,
+                        paths: BTreeMap::new(),
+                    }),
                     Box::new(FlagRule),
-                    Box::new(PortClassificationRule),
+                    Box::new(SuspiciousPortsConfig {
+                        enabled: true,
+                        ports: BTreeMap::new(),
+                    }),
                     Box::new(SuspiciousIpRule),
                     Box::new(IpClassificationRule),
                     Box::new(RunAsRootRule),
                     Box::new(BindConnRules),
                     Box::new(RunAsRootProcessRule),
-                    Box::new(SuspiciousExecPath),
+                    Box::new(SuspiciousExecPathConfig {
+                        enabled: true,
+                        paths: BTreeMap::new(),
+                    }),
                 ],
             },
+            rules: None,
         }
     }
 
-    classify_classifier!(classify_open, FileOpenEvent, false);
-    classify_classifier!(classify_close, FileCloseEvent, false);
-    classify_classifier!(classify_read, FileReadEvent, false);
-    classify_classifier!(classify_rename, FileRenameEvent, false);
-    classify_classifier!(classify_write, FileWriteEvent, false);
+    classify_classifier!(classify_open, FileOpenEvent);
+    classify_classifier!(classify_close, FileCloseEvent);
+    classify_classifier!(classify_read, FileReadEvent);
+    classify_classifier!(classify_rename, FileRenameEvent);
+    classify_classifier!(classify_write, FileWriteEvent);
 
-    classify_classifier!(classify_accept, AcceptEvent, true);
-    classify_classifier!(classify_connect, ConnectEvent, true);
-    classify_classifier!(classify_bind, BindEvent, false);
-    classify_classifier!(classify_listen, ListenEvent, false);
-    classify_classifier!(classify_network_close, CloseEvent, false);
+    classify_classifier!(classify_accept, AcceptEvent);
+    classify_classifier!(classify_connect, ConnectEvent);
+    classify_classifier!(classify_bind, BindEvent);
+    classify_classifier!(classify_listen, ListenEvent);
+    classify_classifier!(classify_network_close, CloseEvent);
 
-    classify_classifier!(classify_process_start, ProcessStartEvent, false);
-    classify_classifier!(classify_process_exit, ProcessExitEvent, false);
-    classify_classifier!(classify_process_fork, ProcessForkEvent, false);
+    classify_classifier!(classify_process_start, ProcessStartEvent);
+    classify_classifier!(classify_process_exit, ProcessExitEvent);
+    classify_classifier!(classify_process_fork, ProcessForkEvent);
 }
 
 trait NetworkCommon {
@@ -709,28 +730,28 @@ impl NetworkCommon for CloseEvent {
     impl_network_common!();
 }
 
-pub struct PortClassificationRule;
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct SuspiciousPortsConfig {
+    pub enabled: bool,
+    pub ports: BTreeMap<Severity, Vec<u16>>,
+}
 
-impl PortClassificationRule {
-    fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
+impl SuspiciousPortsConfig {
+    fn check<T>(&self, event: &T, ctx: &RuleContext) -> Option<Severity>
     where
         T: NetworkCommon,
     {
-        SUSPICIOUS_PORTS
-            .iter()
-            .filter_map(|(port, sev)| {
-                if port == &event.endpoints().remote_port || port == &event.endpoints().local_port {
-                    Some(sev)
-                } else {
-                    None
-                }
-            })
-            .next()
-            .copied()
+        let config = ctx.rules_config.and_then(|s| s.suspicious_ports.as_ref())?;
+
+        config.ports.iter().find_map(|(severity, pids)| {
+            pids.iter()
+                .any(|x| *x == event.endpoints().remote_port || *x == event.endpoints().local_port)
+                .then_some(*severity)
+        })
     }
 }
 
-impl Rule for PortClassificationRule {
+impl Rule for SuspiciousPortsConfig {
     fn name(&self) -> &'static str {
         "SuspiciousPort"
     }
@@ -942,9 +963,13 @@ impl ProcessCommon for ProcessForkEvent {
     }
 }
 
-pub struct SuspiciousExecPath;
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct SuspiciousExecPathConfig {
+    pub enabled: bool,
+    pub paths: BTreeMap<Severity, Vec<String>>,
+}
 
-const SUSPICIOUS_EXEC_PATHS: &[(&str, Severity)] = &[
+pub const SUSPICIOUS_EXEC_PATHS: &[(&str, Severity)] = &[
     ("/tmp", Severity::Medium),
     ("/var/tmp", Severity::Medium),
     ("/dev/shm", Severity::Medium),
@@ -952,28 +977,30 @@ const SUSPICIOUS_EXEC_PATHS: &[(&str, Severity)] = &[
     ("/var/run", Severity::Low),
 ];
 
-impl SuspiciousExecPath {
-    fn check(&self, event: &ProcessStartEvent, _: &RuleContext) -> Option<Severity> {
-        SUSPICIOUS_EXEC_PATHS
-            .iter()
-            .filter_map(|(s, sev)| {
-                if event.filename.starts_with(s) {
-                    Some(sev)
-                } else {
-                    None
-                }
-            })
-            .next()
-            .copied()
+impl SuspiciousExecPathConfig {
+    fn check<T>(&self, event: &T, ctx: &RuleContext) -> Option<Severity>
+    where
+        T: ProcessCommon,
+    {
+        let config = ctx
+            .rules_config
+            .and_then(|s| s.suspicious_exec_path.as_ref())?;
+
+        config.paths.iter().find_map(|(severity, paths)| {
+            paths
+                .iter()
+                .any(|path| get_exe(event.header().pid).starts_with(path))
+                .then_some(*severity)
+        })
     }
 }
 
-impl Rule for SuspiciousExecPath {
+impl Rule for SuspiciousExecPathConfig {
     fn name(&self) -> &'static str {
         "SuspiciousExecPath"
     }
 
-    match_event!(ProcessStart);
+    match_event!(ProcessStart, ProcessExit, ProcessFork);
 }
 pub struct RunAsRootProcessRule;
 
