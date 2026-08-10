@@ -399,6 +399,7 @@ fn render_detail_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     };
 
+    let rules = event.event.rule_name();
     let lines = build_detail_lines(event, app);
     frame.render_widget(
         Paragraph::new(lines)
@@ -494,6 +495,7 @@ fn render_network(
 
 fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let rules = event.event.rule_name();
 
     let sev = &event.severity;
     let sev_col = sev_color(&sev);
@@ -667,16 +669,19 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
         }
     }
 
+    if !rules.is_empty() {
+        lines.push(Line::from(""));
+        section(&mut lines, "RULES");
+
+        for rule in rules {
+            lines.push(Line::from(vec![
+                Span::styled("▸ ", Style::default().fg(C_MUTED)),
+                Span::styled(rule.clone(), Style::default().fg(C_YELLOW)),
+            ]));
+        }
+    }
+
     Text::from(lines)
-}
-
-// should I make this a popup?? coule be annoying..
-fn render_alert(frame: &mut Frame) {
-    todo!()
-}
-
-fn render_help_popup(frame: &mut Frame, app: &mut App) {
-    todo!()
 }
 
 fn key(s: &'static str) -> Span<'static> {

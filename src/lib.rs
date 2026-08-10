@@ -189,6 +189,17 @@ pub enum AppEvent {
 }
 
 impl AppEvent {
+    pub fn rule_name(&self) -> &[String] {
+        match self {
+            AppEvent::ProcessStart(e) => e.matched_rules.as_slice(),
+            AppEvent::ProcessExit(e) => e.matched_rules.as_slice(),
+            AppEvent::FileOpen(e) => e.matched_rules.as_slice(),
+            AppEvent::FileClose(e) => e.matched_rules.as_slice(),
+            AppEvent::NetworkAccept(e) => e.matched_rules.as_slice(),
+            AppEvent::NetworkConnect(e) => e.matched_rules.as_slice(),
+        }
+    }
+
     pub fn event_type(&mut self) -> EventType {
         match self {
             AppEvent::ProcessStart(_) => EventType::ProcessStart,
