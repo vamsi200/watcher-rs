@@ -566,6 +566,29 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 if ok { C_TEXT } else { C_RED },
             );
         }
+        AppEvent::ProcessFork(e) => {
+            section(&mut lines, "ProcessExit");
+            kv(
+                &mut lines,
+                "child pid",
+                &e.event.child_pid.to_string(),
+                C_TEXT,
+            );
+            kv(&mut lines, "child comm ", &&e.event.child_comm, C_PATH);
+            kv(
+                &mut lines,
+                "parent pid ",
+                &e.event.parent.pid.to_string(),
+                C_TEXT,
+            );
+            kv(&mut lines, "parent comm ", &&e.event.parent.comm, C_PATH);
+            kv(
+                &mut lines,
+                "ppid ",
+                &e.event.parent.ppid.to_string(),
+                C_TEXT,
+            );
+        }
         AppEvent::FileOpen(e) => {
             section(&mut lines, "FileOpen");
             kv(&mut lines, "name", &e.event.header.comm, C_TEXT);
@@ -656,6 +679,154 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 C_MUTED,
             );
         }
+
+        AppEvent::FileWrite(e) => {
+            section(&mut lines, "FileWrite");
+            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
+            kv(
+                &mut lines,
+                "ppid",
+                &e.event.header.ppid.to_string(),
+                C_MUTED,
+            );
+            kv(
+                &mut lines,
+                "uid",
+                &uid_label(e.event.header.uid),
+                uid_color(e.event.header.uid),
+            );
+            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
+            kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
+            kv(
+                &mut lines,
+                "flags",
+                &format!("{:#010x}", e.event.flags),
+                C_MUTED,
+            );
+            let ok = e.event.retval >= 0;
+            kv(
+                &mut lines,
+                "retval",
+                &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
+                if ok { C_TEXT } else { C_RED },
+            );
+            kv(
+                &mut lines,
+                "mode",
+                &format!("{:?}", e.event.file_type),
+                C_MUTED,
+            );
+        }
+
+        AppEvent::FileRename(e) => {
+            section(&mut lines, "FileRename");
+            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
+            kv(
+                &mut lines,
+                "ppid",
+                &e.event.header.ppid.to_string(),
+                C_MUTED,
+            );
+            kv(
+                &mut lines,
+                "uid",
+                &uid_label(e.event.header.uid),
+                uid_color(e.event.header.uid),
+            );
+            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
+            kv(&mut lines, "old_filename ", &e.event.old_filename, C_PATH);
+            kv(&mut lines, "new_filename ", &e.event.new_filename, C_PATH);
+            kv(
+                &mut lines,
+                "flags",
+                &format!("{:#010x}", e.event.flags),
+                C_MUTED,
+            );
+            let ok = e.event.retval >= 0;
+            kv(
+                &mut lines,
+                "retval",
+                &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
+                if ok { C_TEXT } else { C_RED },
+            );
+            kv(
+                &mut lines,
+                "mode",
+                &format!("{:?}", e.event.file_type),
+                C_MUTED,
+            );
+        }
+
+        AppEvent::FileRead(e) => {
+            section(&mut lines, "FileRead");
+            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
+            kv(
+                &mut lines,
+                "ppid",
+                &e.event.header.ppid.to_string(),
+                C_MUTED,
+            );
+            kv(
+                &mut lines,
+                "uid",
+                &uid_label(e.event.header.uid),
+                uid_color(e.event.header.uid),
+            );
+            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
+            kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
+            kv(
+                &mut lines,
+                "flags",
+                &format!("{:#010x}", e.event.flags),
+                C_MUTED,
+            );
+            let ok = e.event.retval >= 0;
+            kv(
+                &mut lines,
+                "retval",
+                &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
+                if ok { C_TEXT } else { C_RED },
+            );
+            kv(
+                &mut lines,
+                "mode",
+                &format!("{:?}", e.event.file_type),
+                C_MUTED,
+            );
+        }
+
+        AppEvent::FileDelete(e) => {
+            section(&mut lines, "FileWrite");
+            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
+            kv(
+                &mut lines,
+                "ppid",
+                &e.event.header.ppid.to_string(),
+                C_MUTED,
+            );
+            kv(
+                &mut lines,
+                "uid",
+                &uid_label(e.event.header.uid),
+                uid_color(e.event.header.uid),
+            );
+            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
+            kv(&mut lines, "filename ", &e.event.filename, C_PATH);
+            let ok = e.event.retval >= 0;
+            kv(
+                &mut lines,
+                "retval",
+                &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
+                if ok { C_TEXT } else { C_RED },
+            );
+            kv(
+                &mut lines,
+                "mode",
+                &format!("{:?}", e.event.file_type),
+                C_MUTED,
+            );
+        }
+
         AppEvent::NetworkAccept(e) => {
             render_network(
                 &mut lines,
@@ -670,6 +841,36 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
             render_network(
                 &mut lines,
                 "Connect",
+                &e.event.header,
+                &e.event.protocol,
+                &e.event.endpoints,
+            );
+        }
+
+        AppEvent::NetworkBind(e) => {
+            render_network(
+                &mut lines,
+                "Bind",
+                &e.event.header,
+                &e.event.protocol,
+                &e.event.endpoints,
+            );
+        }
+
+        AppEvent::NetworkClose(e) => {
+            render_network(
+                &mut lines,
+                "Close",
+                &e.event.header,
+                &e.event.protocol,
+                &e.event.endpoints,
+            );
+        }
+
+        AppEvent::NetworkListen(e) => {
+            render_network(
+                &mut lines,
+                "Listen",
                 &e.event.header,
                 &e.event.protocol,
                 &e.event.endpoints,

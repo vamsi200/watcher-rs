@@ -299,10 +299,18 @@ impl Severity {
 pub enum EventType {
     ProcessStart,
     ProcessExit,
+    ProcessFork,
     FileOpen,
     FileClose,
-    AcceptEvent,
-    ConnectEvent,
+    FileDelete,
+    FileRead,
+    FileRename,
+    FileWrite,
+    NetworkAccept,
+    NetworkConnect,
+    NetworkBind,
+    NetworkClose,
+    NetworkListen,
 }
 
 #[derive(
@@ -311,10 +319,18 @@ pub enum EventType {
 pub enum AppEvent {
     ProcessStart(Classified<ProcessStartEvent>),
     ProcessExit(Classified<ProcessExitEvent>),
+    ProcessFork(Classified<ProcessForkEvent>),
     FileOpen(Classified<FileOpenEvent>),
     FileClose(Classified<FileCloseEvent>),
+    FileDelete(Classified<FileDeleteEvent>),
+    FileRead(Classified<FileReadEvent>),
+    FileRename(Classified<FileRenameEvent>),
+    FileWrite(Classified<FileWriteEvent>),
     NetworkAccept(Classified<AcceptEvent>),
     NetworkConnect(Classified<ConnectEvent>),
+    NetworkBind(Classified<BindEvent>),
+    NetworkClose(Classified<CloseEvent>),
+    NetworkListen(Classified<ListenEvent>),
 }
 
 impl AppEvent {
@@ -322,10 +338,18 @@ impl AppEvent {
         match self {
             AppEvent::ProcessStart(e) => e.matched_rules.as_slice(),
             AppEvent::ProcessExit(e) => e.matched_rules.as_slice(),
+            AppEvent::ProcessFork(e) => e.matched_rules.as_slice(),
             AppEvent::FileOpen(e) => e.matched_rules.as_slice(),
             AppEvent::FileClose(e) => e.matched_rules.as_slice(),
+            AppEvent::FileDelete(e) => e.matched_rules.as_slice(),
+            AppEvent::FileRead(e) => e.matched_rules.as_slice(),
+            AppEvent::FileRename(e) => e.matched_rules.as_slice(),
+            AppEvent::FileWrite(e) => e.matched_rules.as_slice(),
             AppEvent::NetworkAccept(e) => e.matched_rules.as_slice(),
             AppEvent::NetworkConnect(e) => e.matched_rules.as_slice(),
+            AppEvent::NetworkBind(e) => e.matched_rules.as_slice(),
+            AppEvent::NetworkClose(e) => e.matched_rules.as_slice(),
+            AppEvent::NetworkListen(e) => e.matched_rules.as_slice(),
         }
     }
 
@@ -333,18 +357,32 @@ impl AppEvent {
         match self {
             AppEvent::ProcessStart(_) => EventType::ProcessStart,
             AppEvent::ProcessExit(_) => EventType::ProcessExit,
+            AppEvent::ProcessFork(_) => EventType::ProcessFork,
             AppEvent::FileOpen(_) => EventType::FileOpen,
             AppEvent::FileClose(_) => EventType::FileClose,
-            AppEvent::NetworkAccept(_) => EventType::AcceptEvent,
-            AppEvent::NetworkConnect(_) => EventType::ConnectEvent,
+            AppEvent::FileDelete(_) => EventType::FileClose,
+            AppEvent::FileRead(_) => EventType::FileClose,
+            AppEvent::FileRename(_) => EventType::FileClose,
+            AppEvent::FileWrite(_) => EventType::FileWrite,
+            AppEvent::NetworkAccept(_) => EventType::NetworkAccept,
+            AppEvent::NetworkConnect(_) => EventType::NetworkConnect,
+            AppEvent::NetworkBind(_) => EventType::NetworkBind,
+            AppEvent::NetworkClose(_) => EventType::NetworkClose,
+            AppEvent::NetworkListen(_) => EventType::NetworkListen,
         }
     }
 
+    //TODO
     pub fn matches_filter(&self, filter_idx: usize) -> bool {
         let val = FILTEREVENTS[filter_idx];
         match val {
             "FileOpen" => matches!(self, AppEvent::FileOpen(_)),
             "FileClose" => matches!(self, AppEvent::FileClose(_)),
+            "FileDelete" => matches!(self, AppEvent::FileDelete(_)),
+            "FileRename" => matches!(self, AppEvent::FileRename(_)),
+            "FileRead" => matches!(self, AppEvent::FileRead(_)),
+            "FileWrite" => matches!(self, AppEvent::FileWrite(_)),
+
             "NetworkAccept" => matches!(self, AppEvent::NetworkAccept(_)),
             "ProcessStart" => matches!(self, AppEvent::ProcessStart(_)),
             "ProcessExit" => matches!(self, AppEvent::ProcessExit(_)),
@@ -357,10 +395,18 @@ impl AppEvent {
         match self {
             AppEvent::ProcessStart(e) => e.event.header.timestamp_ns,
             AppEvent::ProcessExit(e) => e.event.header.timestamp_ns,
+            AppEvent::ProcessFork(e) => e.event.parent.timestamp_ns,
             AppEvent::FileOpen(e) => e.event.header.timestamp_ns,
             AppEvent::FileClose(e) => e.event.header.timestamp_ns,
+            AppEvent::FileDelete(e) => e.event.header.timestamp_ns,
+            AppEvent::FileRead(e) => e.event.header.timestamp_ns,
+            AppEvent::FileRename(e) => e.event.header.timestamp_ns,
+            AppEvent::FileWrite(e) => e.event.header.timestamp_ns,
             AppEvent::NetworkAccept(e) => e.event.header.timestamp_ns,
             AppEvent::NetworkConnect(e) => e.event.header.timestamp_ns,
+            AppEvent::NetworkBind(e) => e.event.header.timestamp_ns,
+            AppEvent::NetworkClose(e) => e.event.header.timestamp_ns,
+            AppEvent::NetworkListen(e) => e.event.header.timestamp_ns,
         }
     }
 
@@ -368,10 +414,19 @@ impl AppEvent {
         match self {
             AppEvent::ProcessStart(e) => e.event.header.pid,
             AppEvent::ProcessExit(e) => e.event.header.pid,
+            AppEvent::ProcessFork(e) => e.event.parent.pid,
             AppEvent::FileOpen(e) => e.event.header.pid,
             AppEvent::FileClose(e) => e.event.header.pid,
+            AppEvent::FileDelete(e) => e.event.header.pid,
+            AppEvent::FileRead(e) => e.event.header.pid,
+            AppEvent::FileRename(e) => e.event.header.pid,
+            AppEvent::FileWrite(e) => e.event.header.pid,
+
             AppEvent::NetworkAccept(e) => e.event.header.pid,
             AppEvent::NetworkConnect(e) => e.event.header.pid,
+            AppEvent::NetworkBind(e) => e.event.header.pid,
+            AppEvent::NetworkClose(e) => e.event.header.pid,
+            AppEvent::NetworkListen(e) => e.event.header.pid,
         }
     }
 
@@ -379,24 +434,44 @@ impl AppEvent {
         match self {
             AppEvent::ProcessStart(_) => "ProcessStart ",
             AppEvent::ProcessExit(_) => "ProcessExit  ",
+            AppEvent::ProcessFork(_) => "ProcessFork  ",
             AppEvent::FileOpen(_) => "FileOpen ",
             AppEvent::FileClose(_) => "FileClose ",
+            AppEvent::FileDelete(_) => "FileDelete ",
+            AppEvent::FileRead(_) => "FileRead ",
+            AppEvent::FileRename(_) => "FileRename ",
+            AppEvent::FileWrite(_) => "FileWrite ",
+
             AppEvent::NetworkAccept(_) => "NetworkAccept  ",
             AppEvent::NetworkConnect(_) => "NetworkConnect  ",
+            AppEvent::NetworkBind(_) => "NetworkBind  ",
+            AppEvent::NetworkClose(_) => "NetworkClose  ",
+            AppEvent::NetworkListen(_) => "NetworkListen  ",
         }
     }
 
     pub fn severity(&self) -> Severity {
         match self {
             AppEvent::FileOpen(e) => e.severity,
-            AppEvent::NetworkAccept(e) => e.severity,
+            AppEvent::FileClose(e) => e.severity,
+            AppEvent::FileDelete(e) => e.severity,
+            AppEvent::FileRead(e) => e.severity,
+            AppEvent::FileRename(e) => e.severity,
+            AppEvent::FileWrite(e) => e.severity,
+
             AppEvent::ProcessStart(e) => e.severity,
             AppEvent::ProcessExit(e) => e.severity,
-            AppEvent::FileClose(e) => e.severity,
+            AppEvent::ProcessFork(e) => e.severity,
+
+            AppEvent::NetworkAccept(e) => e.severity,
             AppEvent::NetworkConnect(e) => e.severity,
+            AppEvent::NetworkBind(e) => e.severity,
+            AppEvent::NetworkClose(e) => e.severity,
+            AppEvent::NetworkListen(e) => e.severity,
         }
     }
 
+    //TODO
     pub fn detail(&self) -> String {
         match self {
             AppEvent::ProcessStart(e) => {
@@ -405,15 +480,50 @@ impl AppEvent {
             AppEvent::ProcessExit(e) => {
                 format!("pid {} exited", e.event.header.pid)
             }
+            AppEvent::ProcessFork(e) => {
+                format!(
+                    "parent pid {} child pid {}",
+                    e.event.parent.pid, e.event.child_pid
+                )
+            }
+
             AppEvent::FileOpen(e) => e.event.file_path.clone(),
             AppEvent::FileClose(e) => {
                 format!("close {}", &e.event.header.comm)
             }
+            AppEvent::FileDelete(e) => {
+                format!("delete {}", &e.event.filename)
+            }
+            AppEvent::FileRead(e) => {
+                format!("read {}", &e.event.file_path)
+            }
+            AppEvent::FileRename(e) => {
+                format!(
+                    "rename from {} to {}",
+                    &e.event.old_filename, &e.event.new_filename
+                )
+            }
+            AppEvent::FileWrite(e) => {
+                format!("write {}", &e.event.file_path)
+            }
+
             AppEvent::NetworkAccept(e) => {
                 let addr = e.event.endpoints.remote_ip.to_string();
                 format!("→  {addr}")
             }
             AppEvent::NetworkConnect(e) => {
+                let addr = e.event.endpoints.remote_ip.to_string();
+                format!("→  {addr}")
+            }
+            AppEvent::NetworkBind(e) => {
+                let addr = e.event.endpoints.remote_ip.to_string();
+                format!("→  {addr}")
+            }
+            AppEvent::NetworkClose(e) => {
+                let addr = e.event.endpoints.remote_ip.to_string();
+                format!("→  {addr}")
+            }
+            AppEvent::NetworkListen(e) => {
                 let addr = e.event.endpoints.remote_ip.to_string();
                 format!("→  {addr}")
             }

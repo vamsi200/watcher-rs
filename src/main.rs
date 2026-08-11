@@ -197,6 +197,13 @@ async fn read_events<'a>(
                         }
                     }
 
+                    ProcessEvent::Fork(e) => {
+                        let e = classifier.classify_process_fork(e);
+                        if tx.send(AppEvent::ProcessFork(e)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+
                     ProcessEvent::Exit(e) => {
                         let e = classifier.classify_process_exit(e);
                         if tx.send(AppEvent::ProcessExit(e)).await.is_err() {
@@ -259,6 +266,39 @@ async fn read_events<'a>(
                         }
                     }
 
+                    FileEvent::Read(e) => {
+                        let event = classifier.classify_read(e);
+
+                        if tx.send(AppEvent::FileRead(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+
+                    FileEvent::Rename(e) => {
+                        let event = classifier.classify_rename(e);
+
+                        if tx.send(AppEvent::FileRename(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+
+                    FileEvent::Delete(e) => {
+                        let event = classifier.classify_delete(e);
+
+                        if tx.send(AppEvent::FileDelete(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+
+                    FileEvent::Write(e) => {
+                        let event = classifier.classify_write(e);
+
+                        if tx.send(AppEvent::FileWrite(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+
+
                     _ => {}
                 }
             }
@@ -284,6 +324,27 @@ async fn read_events<'a>(
                     NetworkEvent::Connect(e) => {
                         let event = classifier.classify_connect(e);
                         if tx.send(AppEvent::NetworkConnect(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+
+                    NetworkEvent::Bind(e) => {
+                        let event = classifier.classify_bind(e);
+                        if tx.send(AppEvent::NetworkBind(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+
+                    NetworkEvent::Close(e) => {
+                        let event = classifier.classify_network_close(e);
+                        if tx.send(AppEvent::NetworkClose(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+
+                    NetworkEvent::Listen(e) => {
+                        let event = classifier.classify_listen(e);
+                        if tx.send(AppEvent::NetworkListen(event)).await.is_err() {
                             return Ok(());
                         }
                     }

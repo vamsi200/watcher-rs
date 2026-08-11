@@ -443,6 +443,7 @@ pub enum Event<'a> {
     FileRead(&'a FileReadEvent),
     FileRename(&'a FileRenameEvent),
     FileWrite(&'a FileWriteEvent),
+    FileDelete(&'a FileDeleteEvent),
     ProcessStart(&'a ProcessStartEvent),
     ProcessExit(&'a ProcessExitEvent),
     ProcessFork(&'a ProcessForkEvent),
@@ -468,6 +469,7 @@ impl RuleEngine {
     classify!(classify_read, FileRead, FileReadEvent);
     classify!(classify_rename, FileRename, FileRenameEvent);
     classify!(classify_write, FileWrite, FileWriteEvent);
+    classify!(classify_delete, FileDelete, FileDeleteEvent);
 
     classify!(classify_process_start, ProcessStart, ProcessStartEvent);
     classify!(classify_process_exit, ProcessExit, ProcessExitEvent);
@@ -703,6 +705,7 @@ impl Classifier {
     classify_classifier!(classify_read, FileReadEvent);
     classify_classifier!(classify_rename, FileRenameEvent);
     classify_classifier!(classify_write, FileWriteEvent);
+    classify_classifier!(classify_delete, FileDeleteEvent);
 
     classify_classifier!(classify_accept, AcceptEvent);
     classify_classifier!(classify_connect, ConnectEvent);
