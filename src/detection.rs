@@ -212,6 +212,13 @@ pub struct Rules {
     pub sensitive_path: Option<SensitivePathConfig>,
     pub suspicious_exec_path: Option<SuspiciousExecPathConfig>,
     pub suspicious_ports: Option<SuspiciousPortsConfig>,
+    pub ignore_pids: Option<IgnorePidsConfig>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct IgnorePidsConfig {
+    pub enabled: bool,
+    pub pids: Vec<u32>,
 }
 
 pub struct FileEventFilter {
@@ -554,12 +561,16 @@ impl SensitivePathConfig {
             .rules_config
             .and_then(|rules| rules.sensitive_path.as_ref())?;
 
-        config.paths.iter().find_map(|(severity, paths)| {
-            paths
-                .iter()
-                .any(|path| event.file_path().starts_with(path))
-                .then_some(*severity)
-        })
+        if config.enabled {
+            config.paths.iter().find_map(|(severity, paths)| {
+                paths
+                    .iter()
+                    .any(|path| event.file_path().starts_with(path))
+                    .then_some(*severity)
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -743,11 +754,17 @@ impl SuspiciousPortsConfig {
     {
         let config = ctx.rules_config.and_then(|s| s.suspicious_ports.as_ref())?;
 
-        config.ports.iter().find_map(|(severity, pids)| {
-            pids.iter()
-                .any(|x| *x == event.endpoints().remote_port || *x == event.endpoints().local_port)
-                .then_some(*severity)
-        })
+        if config.enabled {
+            config.ports.iter().find_map(|(severity, pids)| {
+                pids.iter()
+                    .any(|x| {
+                        *x == event.endpoints().remote_port || *x == event.endpoints().local_port
+                    })
+                    .then_some(*severity)
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -986,12 +1003,16 @@ impl SuspiciousExecPathConfig {
             .rules_config
             .and_then(|s| s.suspicious_exec_path.as_ref())?;
 
-        config.paths.iter().find_map(|(severity, paths)| {
-            paths
-                .iter()
-                .any(|path| get_exe(event.header().pid).starts_with(path))
-                .then_some(*severity)
-        })
+        if config.enabled {
+            config.paths.iter().find_map(|(severity, paths)| {
+                paths
+                    .iter()
+                    .any(|path| get_exe(event.header().pid).starts_with(path))
+                    .then_some(*severity)
+            })
+        } else {
+            None
+        }
     }
 }
 

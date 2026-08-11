@@ -1,7 +1,8 @@
 #![allow(unused)]
 use std::process::id;
+use std::time::{Duration, Instant};
 
-use crate::app::{App, FILTEREVENTS, Focus, UiEvent, ViewMode};
+use crate::app::{App, ConfigState, FILTEREVENTS, Focus, UiEvent, ViewMode};
 use crate::helper::format_timestamp_ns;
 use crate::write::{BatchInfo, PER_BATCH_SIZE};
 use crate::*;
@@ -42,19 +43,21 @@ fn sev_color(s: &Severity) -> Color {
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    app.update_config_notification();
     let area = frame.area();
     frame.render_widget(Block::default().style(Style::default().bg(C_BG2)), area);
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
             Constraint::Min(0),    // main part
-            Constraint::Length(1), // below stats bar.. should I keep it??
+            Constraint::Length(1), // below stats bar
         ])
         .split(area);
 
     render_status_bar(frame, app, chunks[1]);
 
     render_main(frame, app, chunks[0]);
+    render_config_notification(frame, app);
 }
 
 fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -729,4 +732,32 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Paragraph::new(spans).style(Style::default().bg(C_BG2)),
         area,
     );
+}
+
+fn render_config_notification(frame: &mut Frame, app: &App) {
+    let Some((state, _)) = &app.config_notification else {
+        return;
+    };
+
+    let message = match state {
+        ConfigState::ConfigReloaded => "✓  Configuration reloaded",
+        ConfigState::ConfigReloadFailed => "✗  Configuration reload failed",
+    };
+
+    let area = frame.area();
+
+    let width = message.len() as u16 + 2;
+
+    let notification_area = Rect {
+        x: area.width.saturating_sub(width + 2),
+        y: area.height.saturating_sub(5),
+        width,
+        height: 3,
+    };
+
+    let paragraph = Paragraph::new(message)
+        .block(Block::bordered())
+        .alignment(Alignment::Center);
+
+    frame.render_widget(paragraph, notification_area);
 }

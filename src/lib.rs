@@ -78,9 +78,9 @@ pub fn open_rules_file() -> color_eyre::eyre::Result<File> {
         .open(config_path.join("rules.toml"))?)
 }
 
-pub static RULE_CONFIG: LazyLock<Rules> = LazyLock::new(|| write_sensitive_path_config().unwrap());
+pub static RULE_CONFIG: LazyLock<Rules> = LazyLock::new(|| write_path_config().unwrap());
 
-pub fn write_sensitive_path_config() -> color_eyre::eyre::Result<Rules> {
+pub fn write_path_config() -> color_eyre::eyre::Result<Rules> {
     let mut file = open_rules_file().unwrap();
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
@@ -129,6 +129,7 @@ pub fn write_sensitive_path_config() -> color_eyre::eyre::Result<Rules> {
         sensitive_path: Some(sp_config),
         suspicious_exec_path: Some(sus_exec_config),
         suspicious_ports: Some(sus_port_config),
+        ignore_pids: None,
     };
 
     let toml = toml::to_string_pretty(&config)?;

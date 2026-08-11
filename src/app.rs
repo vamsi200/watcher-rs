@@ -33,6 +33,7 @@ use ratatui::layout::Position;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use ratatui::{DefaultTerminal, widgets::ScrollbarState};
+use rkyv::rancor::ResultExt;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -64,6 +65,12 @@ pub struct UiEvent {
     pub event: AppEvent,
     pub timestamp: String,
     pub severity: Severity,
+}
+
+#[derive(Debug)]
+pub enum ConfigState {
+    ConfigReloaded,
+    ConfigReloadFailed,
 }
 
 impl UiEvent {
@@ -113,6 +120,7 @@ pub struct App {
     pub follow_tail: bool,
     pub selected_filters: Vec<bool>,
     pub selected_sevs: Vec<bool>,
+    pub config_notification: Option<(ConfigState, Instant)>,
 }
 
 #[derive(Debug)]
@@ -170,6 +178,7 @@ impl Default for App {
             sev_area: Rect::default(),
             selected_filters: vec![false; FILTEREVENTS.len()],
             selected_sevs: vec![false; SEVERITY_FILTERS.len()],
+            config_notification: None,
         }
     }
 }
@@ -299,6 +308,18 @@ impl App {
         };
 
         self.load_batch_range(new_lo, new_hi)
+    }
+
+    fn check_config_state(&mut self, state: ConfigState) {
+        self.config_notification = Some((state, Instant::now() + Duration::from_secs(3)));
+    }
+
+    pub fn update_config_notification(&mut self) {
+        if let Some((_, expires_at)) = &self.config_notification {
+            if Instant::now() >= *expires_at {
+                self.config_notification = None;
+            }
+        }
     }
 
     fn load_batch_range(&mut self, lo: usize, hi: usize) -> color_eyre::Result<()> {
@@ -447,7 +468,7 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
+    fn handle_key(&mut self, key: KeyEvent, config_watcher: &watch::Sender<bool>) {
         if self.searching {
             match key.code {
                 KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -476,6 +497,11 @@ impl App {
                     _ => Focus::Stream,
                 }
             }
+
+            KeyCode::Char('r') => {
+                config_watcher.send(true).unwrap();
+            }
+
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.selected_tab == Focus::Stream {
                     self.follow_tail = false;
@@ -562,6 +588,8 @@ impl App {
         writer_tx: &Sender<UiEvent>,
         mut batch_rx: Receiver<bool>,
         mut live_mode_rx: Receiver<UiEvent>,
+        config_reload_tx: watch::Sender<bool>,
+        mut config_rx: Receiver<ConfigState>,
     ) -> color_eyre::Result<()> {
         let realtime_ns = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
@@ -598,7 +626,7 @@ impl App {
 
                 Some(event) = input_rx.recv() => {
                     match event {
-                        Event::Key(key) => self.handle_key(key),
+                        Event::Key(key) => self.handle_key(key, &config_reload_tx),
                         Event::Mouse(mouse) => self.handle_mouse(mouse),
                         _ => {}
                     }
@@ -635,6 +663,10 @@ impl App {
 
                         self.get_selected();
                     }
+                }
+
+                Some(val) = config_rx.recv() => {
+                    self.check_config_state(val);
                 }
 
                 _ = tick.tick() => {

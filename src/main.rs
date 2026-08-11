@@ -37,7 +37,7 @@ use tokio::{
     sync::{mpsc::Sender, watch},
 };
 use toml::value;
-use watcher_rs::app::UiEvent;
+use watcher_rs::app::{ConfigState, UiEvent};
 use watcher_rs::gen_db::{drop_privleges, parse_ipsum, update_ipsum_db};
 use watcher_rs::write::{LogConfig, RuntimeLogConfig};
 use watcher_rs::*;
@@ -147,6 +147,8 @@ async fn read_events<'a>(
     tx: Sender<AppEvent>,
     mut sh_rx: watch::Receiver<bool>,
     mut sources: EventSources<'a>,
+    mut config_watcher_rx: watch::Receiver<bool>,
+    config_tx: &Sender<ConfigState>,
 ) -> color_eyre::eyre::Result<()> {
     let mut file_event_filter = FileEventFilter::new();
     let mut classifier = Classifier::new();
@@ -157,12 +159,10 @@ async fn read_events<'a>(
         None
     };
 
-    let rule_config = write_sensitive_path_config().unwrap();
-
-    classifier.ipsum_file_bytes = file_bytes;
-    tracing::info!("rules len: {:?}", rule_config.sensitive_path);
-
-    classifier.rules = Some(rule_config);
+    if let Ok(rule_config) = write_path_config() {
+        classifier.ipsum_file_bytes = file_bytes;
+        classifier.rules = Some(rule_config.clone());
+    }
 
     loop {
         tokio::select! {
@@ -170,7 +170,25 @@ async fn read_events<'a>(
                 break;
             }
 
+            _ = config_watcher_rx.changed() => {
+                tracing::info!("reloading config");
+                if let Ok(rule_config) = write_path_config() {
+                    tracing::info!("got new config");
+                    classifier.rules = Some(rule_config);
+                    config_tx.send(ConfigState::ConfigReloaded).await;
+                }else{
+                    config_tx.send(ConfigState::ConfigReloadFailed).await;
+                }
+            }
+
             Some(event) = sources.process.next() => {
+                if let Some(ref config) = classifier.rules {
+                    if let Some(ref config) = config.ignore_pids{
+                        if config.pids.iter().any(|s| event.header().pid == *s) {
+                            continue;
+                        }
+                    }
+                }
                 match event {
                     ProcessEvent::Start(e) => {
                         let e = classifier.classify_process_start(e);
@@ -191,6 +209,13 @@ async fn read_events<'a>(
             }
 
             Some(event) = sources.file.next() => {
+               if let Some(ref config) = classifier.rules {
+                    if let Some(ref config) = config.ignore_pids{
+                        if config.pids.iter().any(|s| event.header().pid == *s) {
+                            continue;
+                        }
+                    }
+                }
 
                 if let Some(inode) = event.inode(){
                     let filter_key = FileKey {
@@ -239,6 +264,14 @@ async fn read_events<'a>(
             }
 
             Some(event) = sources.network.next() => {
+               if let Some(ref config) = classifier.rules {
+                    if let Some(ref config) = config.ignore_pids{
+                        if config.pids.iter().any(|s| event.header().pid == *s) {
+                            continue;
+                        }
+                    }
+                }
+
                 match event {
                     NetworkEvent::Accept(e) => {
                         let event = classifier.classify_accept(e);
@@ -272,6 +305,8 @@ async fn start_ui(
     writer_tx: &tokio::sync::mpsc::Sender<UiEvent>,
     mut batch_ready_rx: tokio::sync::mpsc::Receiver<bool>,
     mut live_mode_rx: tokio::sync::mpsc::Receiver<UiEvent>,
+    mut config_watcher_tx: watch::Sender<bool>,
+    mut config_rx: Receiver<ConfigState>,
 ) -> color_eyre::Result<()> {
     let mut stdout = stdout();
 
@@ -289,6 +324,8 @@ async fn start_ui(
         writer_tx,
         batch_ready_rx,
         live_mode_rx,
+        config_watcher_tx,
+        config_rx,
     )
     .await
     .unwrap();
@@ -301,7 +338,9 @@ async fn start_ui(
 fn start_collectors(
     writer_ready_tx: tokio::sync::oneshot::Sender<()>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    mut config_watcher_rx: watch::Receiver<bool>,
     tx: tokio::sync::mpsc::Sender<AppEvent>,
+    config_tx: Sender<ConfigState>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         let mut bpf = Bpfx::new().unwrap();
@@ -338,7 +377,7 @@ fn start_collectors(
 
         let runtime = bpf.run();
 
-        if let Err(e) = read_events(tx, shutdown_rx, sources).await {
+        if let Err(e) = read_events(tx, shutdown_rx, sources, config_watcher_rx, &config_tx).await {
             eprintln!("{e}");
         }
 
@@ -361,19 +400,29 @@ async fn main() -> color_eyre::Result<()> {
         None => {}
     }
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<AppEvent>(10_000);
+    let (tx, rx) = tokio::sync::mpsc::channel::<AppEvent>(50_000);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let (writer_tx, writer_rx) = tokio::sync::mpsc::channel::<UiEvent>(10_000);
+    let (writer_tx, writer_rx) = tokio::sync::mpsc::channel::<UiEvent>(50_000);
 
     let (batch_ready_tx, batch_ready_rx) = tokio::sync::mpsc::channel::<bool>(100);
 
-    let (live_mode_tx, live_mode_rx) = tokio::sync::mpsc::channel::<UiEvent>(10_000);
+    let (live_mode_tx, live_mode_rx) = tokio::sync::mpsc::channel::<UiEvent>(20_000);
 
     let (writer_ready_tx, writer_ready_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let collector_handle = start_collectors(writer_ready_tx, shutdown_rx, tx);
+    let (config_watcher_tx, config_watcher_rx) = watch::channel::<bool>(false);
+
+    let (config_tx, mut config_rx) = tokio::sync::mpsc::channel::<ConfigState>(100);
+
+    let collector_handle = start_collectors(
+        writer_ready_tx,
+        shutdown_rx,
+        config_watcher_rx,
+        tx,
+        config_tx,
+    );
 
     tracing::info!("collector spawned");
 
@@ -403,7 +452,16 @@ async fn main() -> color_eyre::Result<()> {
         }
     });
 
-    start_ui(rx, &shutdown_tx, &writer_tx, batch_ready_rx, live_mode_rx).await?;
+    start_ui(
+        rx,
+        &shutdown_tx,
+        &writer_tx,
+        batch_ready_rx,
+        live_mode_rx,
+        config_watcher_tx,
+        config_rx,
+    )
+    .await?;
 
     tracing::info!("MAIN ABOUT TO RETURN");
     std::process::exit(0);
