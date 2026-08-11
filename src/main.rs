@@ -184,7 +184,7 @@ async fn read_events<'a>(
             Some(event) = sources.process.next() => {
                 if let Some(ref config) = classifier.rules {
                     if let Some(ref config) = config.ignore_pids{
-                        if config.pids.iter().any(|s| event.header().pid == *s) {
+                        if config.enabled && config.pids.iter().any(|s| event.header().pid == *s) {
                             continue;
                         }
                     }
@@ -211,7 +211,7 @@ async fn read_events<'a>(
             Some(event) = sources.file.next() => {
                if let Some(ref config) = classifier.rules {
                     if let Some(ref config) = config.ignore_pids{
-                        if config.pids.iter().any(|s| event.header().pid == *s) {
+                        if config.enabled && config.pids.iter().any(|s| event.header().pid == *s) {
                             continue;
                         }
                     }
@@ -266,7 +266,7 @@ async fn read_events<'a>(
             Some(event) = sources.network.next() => {
                if let Some(ref config) = classifier.rules {
                     if let Some(ref config) = config.ignore_pids{
-                        if config.pids.iter().any(|s| event.header().pid == *s) {
+                        if config.enabled && config.pids.iter().any(|s| event.header().pid == *s) {
                             continue;
                         }
                     }

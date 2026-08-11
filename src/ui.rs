@@ -81,12 +81,6 @@ const PID_W: usize = 15;
 const TYPE_W: usize = 15;
 
 fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
-    let focused = if app.selected_tab == Focus::Stream {
-        C_BLUE
-    } else {
-        C_BORDER
-    };
-
     let title = if app.searching {
         format!(" search: {} ", app.search_query)
     } else if !app.search_query.is_empty() {
@@ -94,15 +88,13 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         " stream ".to_string()
     };
-
     let block = Block::default()
         .title(title)
         .title_style(Style::default().fg(C_TEXT))
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(focused))
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(C_BORDER))
         .style(Style::default().bg(C_BG));
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -112,33 +104,52 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         width: inner.width,
         height: 1,
     };
-    let list_area = Rect {
+    let sep_area = Rect {
         x: inner.x,
         y: inner.y + 1,
+        width: inner.width,
+        height: 1,
+    };
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + 2,
         width: inner.width,
         height: inner.height.saturating_sub(1),
     };
 
     app.stream_area = inner;
+    app.stream_list_offset = list_area.y - inner.y;
 
-    let line = Line::from(vec![
-        Span::raw(" "),
+    const DIV: &str = "│";
+
+    let header_line = Line::from(vec![
+        Span::raw("  "),
+        Span::styled(format!("{:<TIME_W$}", "TIME"), Style::default().fg(C_MUTED)),
+        Span::styled(format!(" {DIV} "), Style::default().fg(C_BORDER)),
+        Span::styled(format!("{:<SEV_W$}", "SEV"), Style::default().fg(C_MUTED)),
+        Span::styled(format!(" {DIV} "), Style::default().fg(C_BORDER)),
         Span::styled(
-            format!(
-                " {:<TIME_W$} {:<SEV_W$} {:<PID_W$} {:<TYPE_W$}DETAIL",
-                "TIME", "SEV", "PID/PROC", "TYPE",
-            ),
-            Style::default().fg(C_MUTED).bg(C_BG2),
+            format!("{:<PID_W$}", "PID/PROC"),
+            Style::default().fg(C_MUTED),
         ),
+        Span::styled(format!(" {DIV} "), Style::default().fg(C_BORDER)),
+        Span::styled(format!("{:<TYPE_W$}", "TYPE"), Style::default().fg(C_MUTED)),
+        Span::styled(format!(" {DIV} "), Style::default().fg(C_BORDER)),
+        Span::styled("DETAIL", Style::default().fg(C_MUTED)),
     ]);
-
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(C_BG2)),
+        Paragraph::new(header_line).style(Style::default().bg(C_BG)),
         header_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(inner.width as usize),
+            Style::default().fg(C_BORDER),
+        ))),
+        sep_area,
     );
 
     let total = app.filtered_events.len();
-
     if total == 0 {
         return;
     }
@@ -151,53 +162,61 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let selected = app.stream_state.selected().unwrap_or(0);
-
     let mut items: Vec<ListItem> = Vec::new();
 
     for (i, &ev_idx) in app.filtered_events.iter().enumerate() {
         let event: &UiEvent = &app.events[ev_idx];
         let sev = &event.severity;
         let is_sel = selected == i;
-        let sev_col = sev_color(&sev);
+        let sev_col = sev_color(sev);
         let ts = &event.timestamp;
         let pid = event.event.pid();
         let kind = event.event.kind_label();
         let detail = event.event.detail();
-        let border_char = if is_sel { "⯈" } else { " " };
-        let bg = if is_sel { C_BG3 } else { C_BG };
+
+        let bg = if is_sel {
+            C_BG3
+        } else if i % 2 == 1 {
+            C_BG2
+        } else {
+            C_BG
+        };
+        let accent = if is_sel { "▌" } else { " " };
+        let div_style = Style::default().fg(C_BORDER).bg(bg);
 
         let line = Line::from(vec![
-            Span::styled(border_char, Style::default().fg(sev_col).bg(bg)),
+            Span::styled(accent, Style::default().fg(sev_col).bg(bg)),
             Span::styled(
                 format!(" {:<TIME_W$}", &ts[..11.min(ts.len())]),
                 Style::default().fg(C_MUTED).bg(bg),
             ),
+            Span::styled(format!(" {DIV} "), div_style),
             Span::styled(
-                format!(" {:<SEV_W$}", sev.label()),
+                format!("{:<w$}  ", sev.label(), w = SEV_W.saturating_sub(2)),
                 Style::default()
                     .fg(sev_col)
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(format!(" {DIV} "), div_style),
             Span::styled(
-                format!(" {:<PID_W$}", pid),
+                format!("{:<PID_W$}", pid),
                 Style::default().fg(C_TEXT).bg(bg),
             ),
+            Span::styled(format!(" {DIV} "), div_style),
             Span::styled(
-                format!(" {:<TYPE_W$}", kind.trim()),
+                format!("{:<TYPE_W$}", kind.trim()),
                 Style::default().fg(C_PURPLE).bg(bg),
             ),
+            Span::styled(format!(" {DIV} "), div_style),
             Span::styled(detail, Style::default().fg(detail_color(event)).bg(bg)),
         ]);
-
         items.push(ListItem::new(line));
     }
-
     items.push(ListItem::new(Line::from("")));
 
     let list = List::new(items).style(Style::default().bg(C_BG));
     frame.render_stateful_widget(list, list_area, &mut app.stream_state);
-
     render_scrollbar(frame, inner, selected, total);
 }
 
@@ -232,23 +251,17 @@ fn detail_color(event: &UiEvent) -> Color {
 }
 
 pub const SEVERITY_FILTERS: &[(Severity, &str); 5] = &[
-    (Severity::Info, "Info"),
     (Severity::Critical, "Critical"),
     (Severity::High, "High"),
     (Severity::Medium, "Medium"),
     (Severity::Low, "Low"),
+    (Severity::Info, "Info"),
 ];
 
 fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
-    let border = if app.selected_tab == crate::app::Focus::Sidebar {
-        C_BLUE
-    } else {
-        C_BG2
-    };
-
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border))
+        .border_style(Style::default().fg(C_BORDER))
         .style(Style::default().bg(C_BG));
 
     let inner = outer.inner(area);
@@ -272,7 +285,7 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     )
     .split(severity_inner);
 
-    let sev_colors = [C_BG3, C_RED, C_ORANGE, C_YELLOW, C_BLUE];
+    let sev_colors = [C_RED, C_ORANGE, C_YELLOW, C_BLUE, C_BG3];
     let counts = [
         app.info_ev_count,
         app.crit_ev_count,
@@ -371,18 +384,10 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_detail_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
-    let bg = if app.selected_tab == crate::app::Focus::Detail {
-        C_BLUE
-    } else {
-        C_BG2
-    };
-
     let block = Block::default()
-        .title(" detail ")
-        .title_style(Style::default().fg(C_TEXT))
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(bg))
+        .border_style(Style::default().fg(C_BORDER))
         .style(Style::default().bg(C_BG));
 
     let inner = block.inner(area);
@@ -479,18 +484,18 @@ fn render_network(
         Protocol::Udp => "UDP",
     };
 
-    kv(lines, "protocol", proto, C_BLUE);
+    kv(lines, "protocol ", proto, C_BLUE);
 
     kv(
         lines,
-        "source",
+        "source ",
         &format!("{}:{}", endpoints.local_ip, endpoints.local_port),
         C_GREEN,
     );
 
     kv(
         lines,
-        "destination",
+        "destination ",
         &format!("{}:{}", endpoints.remote_ip, endpoints.remote_port),
         C_BLUE,
     );
@@ -692,21 +697,7 @@ fn key(s: &'static str) -> Span<'static> {
 }
 
 fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
-    let mode = match app.selected_tab {
-        Focus::Sidebar => "SIDEBAR",
-        Focus::Stream => "STREAM ",
-        Focus::Detail => "DETAIL ",
-        Focus::Filter => "FILTER",
-    };
-
     let spans = Line::from(vec![
-        Span::styled(
-            format!(" {mode} "),
-            Style::default()
-                .fg(C_BG)
-                .bg(C_BLUE)
-                .add_modifier(Modifier::BOLD),
-        ),
         Span::styled("  ", Style::default().bg(C_BG2)),
         Span::styled("↑↓ nav  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("Tab"),
@@ -722,8 +713,6 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(" 12/24 format  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("Ctrl + l"),
         Span::styled(" Clear  ", Style::default().fg(C_MUTED).bg(C_BG2)),
-        key("Esc"),
-        Span::styled(" back/dismiss  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("q"),
         Span::styled(" quit", Style::default().fg(C_MUTED).bg(C_BG2)),
     ]);

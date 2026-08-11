@@ -96,7 +96,6 @@ pub struct App {
     pub med_ev_count: usize,
     pub low_ev_count: usize,
     pub info_ev_count: usize,
-    pub selected_tab: Focus,
     pub selected_event: Option<UiEvent>,
     pub filtered_events: Vec<usize>,
     pub searching: bool,
@@ -121,6 +120,7 @@ pub struct App {
     pub selected_filters: Vec<bool>,
     pub selected_sevs: Vec<bool>,
     pub config_notification: Option<(ConfigState, Instant)>,
+    pub stream_list_offset: u16,
 }
 
 #[derive(Debug)]
@@ -151,7 +151,6 @@ impl Default for App {
             med_ev_count: 0,
             low_ev_count: 0,
             info_ev_count: 0,
-            selected_tab: Focus::Stream,
             selected_event: None,
             filtered_events: Vec::with_capacity(10),
             searching: false,
@@ -179,6 +178,7 @@ impl Default for App {
             selected_filters: vec![false; FILTEREVENTS.len()],
             selected_sevs: vec![false; SEVERITY_FILTERS.len()],
             config_notification: None,
+            stream_list_offset: 0,
         }
     }
 }
@@ -270,7 +270,7 @@ fn row_at_stream(app: &App, col: u16, row: u16) -> Option<usize> {
         return None;
     }
     let rel = (row - area.y) as usize;
-    let idx = rel + app.stream_state.offset() - 1;
+    let idx = rel + app.stream_state.offset() - app.stream_list_offset as usize;
     (idx < app.filtered_events.len()).then_some(idx)
 }
 
@@ -489,30 +489,15 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Tab => {
-                self.selected_tab = match self.selected_tab {
-                    Focus::Sidebar => Focus::Stream,
-                    Focus::Stream => Focus::Detail,
-                    Focus::Detail => Focus::Sidebar,
-                    _ => Focus::Stream,
-                }
-            }
-
             KeyCode::Char('r') => {
                 config_watcher.send(true).unwrap();
             }
 
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.selected_tab == Focus::Stream {
-                    self.follow_tail = false;
-                    self.scroll_up();
-                }
+                self.follow_tail = false;
+                self.scroll_up();
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.selected_tab == Focus::Stream {
-                    self.scroll_down()
-                }
-            }
+            KeyCode::Down | KeyCode::Char('j') => self.scroll_down(),
             KeyCode::Enter => {
                 let idx = self.stream_state.selected().unwrap_or(0);
             }
@@ -618,12 +603,10 @@ impl App {
             }
         });
 
-        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let mut tick = tokio::time::interval(Duration::from_millis(200));
 
         while self.running {
             tokio::select! {
-                biased;
-
                 Some(event) = input_rx.recv() => {
                     match event {
                         Event::Key(key) => self.handle_key(key, &config_reload_tx),
