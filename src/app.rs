@@ -490,7 +490,9 @@ impl App {
 
         match key.code {
             KeyCode::Char('r') => {
-                config_watcher.send(true).unwrap();
+                if !self.searching {
+                    config_watcher.send(true).unwrap();
+                }
             }
 
             KeyCode::Up | KeyCode::Char('k') => {
@@ -533,8 +535,9 @@ impl App {
             }
 
             KeyCode::Char('q') => {
-                tracing::info!("Pressed q");
-                self.running = false
+                if !self.searching {
+                    self.running = false
+                }
             }
             KeyCode::Char('t') => {
                 self.twle_hr_format = !self.twle_hr_format;
@@ -744,6 +747,7 @@ impl App {
 pub fn match_query(e: &UiEvent, st: &str) -> bool {
     let detail = &e.event.detail();
     let kind = &e.event.kind_label();
+
     if st.bytes().all(|b| b.is_ascii_digit()) {
         if e.event.pid().to_string().contains(st) {
             return true;

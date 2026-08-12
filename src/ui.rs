@@ -77,7 +77,7 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
 
 const TIME_W: usize = 15;
 const SEV_W: usize = 10;
-const PID_W: usize = 15;
+const PID_W: usize = 13;
 const TYPE_W: usize = 15;
 
 fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -287,11 +287,11 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let sev_colors = [C_RED, C_ORANGE, C_YELLOW, C_BLUE, C_BG3];
     let counts = [
-        app.info_ev_count,
         app.crit_ev_count,
         app.high_ev_count,
         app.med_ev_count,
         app.low_ev_count,
+        app.info_ev_count,
     ];
 
     let selected = app.sev_state.selected();
@@ -898,11 +898,22 @@ fn key(s: &'static str) -> Span<'static> {
 }
 
 fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+    let (mode, color) = if app.searching {
+        ("SEARCHING", C_PURPLE)
+    } else {
+        ("STREAM", C_BLUE)
+    };
+
     let spans = Line::from(vec![
+        Span::styled(
+            format!(" {mode} "),
+            Style::default()
+                .fg(C_BG)
+                .bg(color)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("  ", Style::default().bg(C_BG2)),
         Span::styled("↑↓ nav  ", Style::default().fg(C_MUTED).bg(C_BG2)),
-        key("Tab"),
-        Span::styled(" panel  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("p"),
         Span::styled(
             if app.pause { " resume  " } else { " pause  " },
@@ -914,6 +925,8 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(" 12/24 format  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("Ctrl + l"),
         Span::styled(" Clear  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        key("r"),
+        Span::styled(" Reload Config  ", Style::default().fg(C_MUTED).bg(C_BG2)),
         key("q"),
         Span::styled(" quit", Style::default().fg(C_MUTED).bg(C_BG2)),
     ]);
