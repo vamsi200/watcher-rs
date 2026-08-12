@@ -1,15 +1,12 @@
-#![allow(unused)]
 use std::{
-    fs::{self, File, OpenOptions, create_dir, exists, remove_file},
+    fs::{File, OpenOptions, exists, remove_file},
     io::{BufRead, BufReader, Write},
     net::IpAddr,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Command,
     str::FromStr,
-    sync::LazyLock,
 };
 
-use directories::ProjectDirs;
 use libc::{setgid, setuid};
 use rkyv::{rancor::Error, to_bytes};
 
@@ -42,8 +39,8 @@ pub fn drop_privleges() -> color_eyre::Result<()> {
         && let Some(uid) = uid
     {
         unsafe {
-            setgid(u32::from_str(&gid).unwrap());
-            setuid(u32::from_str(&uid).unwrap());
+            setgid(u32::from_str(&gid)?);
+            setuid(u32::from_str(&uid)?);
         }
     } else {
         return Err(color_eyre::eyre::eyre!("Failed to get gid and uid"));
@@ -57,17 +54,17 @@ pub fn parse_ipsum(path: Option<&PathBuf>, update: bool) -> color_eyre::Result<(
         return Err(color_eyre::eyre::eyre!("Failed to get state dir"));
     };
 
-    let mut ipsum_bin = path.join("ipsum.bin");
+    let ipsum_bin = path.join("ipsum.bin");
     let exists = exists(&ipsum_bin)?;
 
-    if update && exists {
-        remove_file(&ipsum_bin);
+    if update && exists && remove_file(&ipsum_bin).is_err() {
+        eprintln!("failed to remove: {}", ipsum_bin.display());
     }
     if !update && exists {
         return Ok(());
     }
 
-    let mut file = File::open(path.join("ipsum.txt"))?;
+    let file = File::open(path.join("ipsum.txt"))?;
 
     let mut ipsum_bin = OpenOptions::new()
         .create(true)
@@ -92,19 +89,17 @@ pub fn parse_ipsum(path: Option<&PathBuf>, update: bool) -> color_eyre::Result<(
 
         if let Some(ip) = split_iter.next()
             && let Some(black_list_count) = split_iter.next()
+            && let Ok(ip) = IpAddr::from_str(ip)
+            && let Ok(score) = u8::from_str(black_list_count)
         {
-            if let Ok(ip) = IpAddr::from_str(ip)
-                && let Ok(score) = u8::from_str(black_list_count)
-            {
-                match ip {
-                    IpAddr::V4(ip) => {
-                        let ip = u32::from(ip);
-                        v4_map.push(EntryV4 { ip, score });
-                    }
-                    IpAddr::V6(ip) => {
-                        let ip = u128::from(ip);
-                        v6_map.push(EntryV6 { ip, score });
-                    }
+            match ip {
+                IpAddr::V4(ip) => {
+                    let ip = u32::from(ip);
+                    v4_map.push(EntryV4 { ip, score });
+                }
+                IpAddr::V6(ip) => {
+                    let ip = u128::from(ip);
+                    v6_map.push(EntryV6 { ip, score });
                 }
             }
         }
@@ -123,7 +118,7 @@ pub fn parse_ipsum(path: Option<&PathBuf>, update: bool) -> color_eyre::Result<(
     };
 
     let bytes = to_bytes::<Error>(&db)?;
-    ipsum_bin.write_all(&bytes);
+    ipsum_bin.write_all(&bytes)?;
 
     Ok(())
 }
@@ -155,7 +150,7 @@ pub fn update_ipsum_db() -> color_eyre::Result<bool> {
 
     if status.success() {
         println!("[INFO] Parsing `ipsum.txt` and creating `ipsum.bin`");
-        parse_ipsum(Some(path), true);
+        parse_ipsum(Some(path), true)?;
         println!("[DONE] created `ipsum.bin`");
         return Ok(true);
     } else {

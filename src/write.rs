@@ -167,7 +167,7 @@ pub fn segment_path(id: u64) -> PathBuf {
 }
 
 pub fn write_to_disk(path: &PathBuf, bytes: AlignedVec) -> color_eyre::eyre::Result<u64> {
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let start_offset = file.metadata()?.len();
     file.write_all(&(bytes.len() as u32).to_le_bytes())?;
     file.write_all(&bytes)?;

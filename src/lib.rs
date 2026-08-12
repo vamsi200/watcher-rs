@@ -21,11 +21,24 @@ use crate::detection::{
 };
 use crate::write::{LogConfig, index_path};
 
-pub static STATE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| get_state_dir().unwrap());
-pub static CONFIG_DIR_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| get_config_dir().unwrap());
+pub static STATE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| match get_state_dir() {
+    Ok(path) => path,
+    Err(e) => {
+        eprintln!("failed to get state directory: {e}");
+        std::process::exit(1);
+    }
+});
+
+pub static CONFIG_DIR_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| match get_config_dir() {
+    Ok(path) => path,
+    Err(e) => {
+        eprintln!("failed to get config directory: {e}");
+        std::process::exit(1);
+    }
+});
 
 pub fn get_log_config() -> color_eyre::eyre::Result<LogConfig> {
-    let mut file = open_config_file().unwrap();
+    let mut file = open_config_file()?;
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
 
@@ -34,7 +47,7 @@ pub fn get_log_config() -> color_eyre::eyre::Result<LogConfig> {
         Ok(config) => config.log_config,
         Err(_) => {
             let config = Config::default();
-            write_init_config(&config.log_config, &mut file).unwrap();
+            write_init_config(&config.log_config, &mut file)?;
             config.log_config
         }
     };
@@ -78,10 +91,16 @@ pub fn open_rules_file() -> color_eyre::eyre::Result<File> {
         .open(config_path.join("rules.toml"))?)
 }
 
-pub static RULE_CONFIG: LazyLock<Rules> = LazyLock::new(|| write_path_config().unwrap());
+pub static RULE_CONFIG: LazyLock<Rules> = LazyLock::new(|| match write_path_config() {
+    Ok(config) => config,
+    Err(e) => {
+        eprintln!("failed to load rule configuration: {e}");
+        std::process::exit(1);
+    }
+});
 
 pub fn write_path_config() -> color_eyre::eyre::Result<Rules> {
-    let mut file = open_rules_file().unwrap();
+    let mut file = open_rules_file()?;
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
 
@@ -165,13 +184,13 @@ pub fn project_directory() -> Option<ProjectDirs> {
 
 pub fn get_state_dir() -> color_eyre::eyre::Result<Option<PathBuf>> {
     let mut state_dir_path: Option<PathBuf> = None;
-    if let Some(prj_dir) = project_directory() {
-        if let Some(state_dir) = prj_dir.state_dir() {
-            if !exists(state_dir)? {
-                create_dir(state_dir)?;
-            }
-            state_dir_path = Some(state_dir.to_path_buf())
+    if let Some(prj_dir) = project_directory()
+        && let Some(state_dir) = prj_dir.state_dir()
+    {
+        if !exists(state_dir)? {
+            create_dir(state_dir)?;
         }
+        state_dir_path = Some(state_dir.to_path_buf())
     }
 
     Ok(state_dir_path)
@@ -222,7 +241,7 @@ pub fn init() -> color_eyre::eyre::Result<()> {
         .truncate(true)
         .write(true)
         .create(true)
-        .open(index_path().unwrap());
+        .open(index_path()?);
 
     Ok(())
 }

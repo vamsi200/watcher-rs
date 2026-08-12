@@ -1,11 +1,7 @@
-#![allow(unused)]
 use crate::AppEvent;
-use crate::EventType;
 use crate::Severity;
-use crate::helper::format_timestamp_ns;
 use crate::ui::*;
 use crate::write::BatchInfo;
-use crate::write::LogConfig;
 use crate::write::PER_BATCH_SIZE;
 use crate::write::RuntimeLogConfig;
 use crate::write::log_path;
@@ -16,42 +12,25 @@ use crate::write::segment_path;
 use crate::write::serialize_event_data;
 use crate::write::write_batch_info_to_disk;
 use crate::write::write_to_disk;
-use clap::value_parser;
-use color_eyre::config::FilterCallback;
-use crossterm::event::ModifierKeyCode;
 use crossterm::event::MouseButton;
 use crossterm::event::MouseEvent;
 use crossterm::event::MouseEventKind;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::LeaveAlternateScreen;
-use futures::SinkExt;
-use libc::READ_IMPLIES_EXEC;
-use libc::setspent;
 use nix::time::ClockId;
 use nix::time::clock_gettime;
+use ratatui::DefaultTerminal;
 use ratatui::layout::Position;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
-use ratatui::{DefaultTerminal, widgets::ScrollbarState};
-use rkyv::rancor::ResultExt;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::collections::VecDeque;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::path::PathBuf;
-use std::process::id;
-use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
-use tracing::info;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::DisableMouseCapture;
 use crossterm::execute;
 
 #[derive(Debug, PartialEq)]
@@ -63,7 +42,6 @@ pub enum ViewMode {
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
 pub struct UiEvent {
     pub event: AppEvent,
-    pub timestamp: String,
     pub severity: Severity,
 }
 
@@ -74,13 +52,11 @@ pub enum ConfigState {
 }
 
 impl UiEvent {
-    pub fn new(ev: AppEvent, twle_hr_format: bool, wallclock_ns: u64) -> Self {
-        let timestamp = format_timestamp_ns(ev.timestamp(), twle_hr_format, wallclock_ns);
+    pub fn new(ev: AppEvent) -> Self {
         let severity = ev.severity();
 
         UiEvent {
             event: ev,
-            timestamp,
             severity,
         }
     }
@@ -144,7 +120,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             running: true,
-            events: Vec::with_capacity(10),
+            events: Vec::with_capacity(1000),
             alert: None,
             crit_ev_count: 0,
             high_ev_count: 0,
@@ -198,7 +174,9 @@ pub async fn writer_thread(
     let mut oldest_segment_id = 0;
 
     while let Some(event) = receiver.recv().await {
-        sender.try_send(event.clone());
+        if let Err(err) = sender.try_send(event.clone()) {
+            tracing::debug!(?err, "dropping event: downstream channel full");
+        }
         batch.push(event);
 
         if batch.len() >= PER_BATCH_SIZE {
@@ -315,10 +293,10 @@ impl App {
     }
 
     pub fn update_config_notification(&mut self) {
-        if let Some((_, expires_at)) = &self.config_notification {
-            if Instant::now() >= *expires_at {
-                self.config_notification = None;
-            }
+        if let Some((_, expires_at)) = &self.config_notification
+            && Instant::now() >= *expires_at
+        {
+            self.config_notification = None;
         }
     }
 
@@ -362,7 +340,7 @@ impl App {
             return Ok(());
         }
 
-        let ev = UiEvent::new(ev, self.twle_hr_format, self.wallclock_offset_ns);
+        let ev = UiEvent::new(ev);
 
         let has_sev_filters = self.selected_sevs.iter().any(|&x| x);
 
@@ -468,7 +446,11 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, config_watcher: &watch::Sender<bool>) {
+    fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        config_watcher: &watch::Sender<bool>,
+    ) -> color_eyre::Result<()> {
         if self.searching {
             match key.code {
                 KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -490,8 +472,8 @@ impl App {
 
         match key.code {
             KeyCode::Char('r') => {
-                if !self.searching {
-                    config_watcher.send(true).unwrap();
+                if !self.searching || !self.running {
+                    config_watcher.send(true)?;
                 }
             }
 
@@ -500,9 +482,6 @@ impl App {
                 self.scroll_up();
             }
             KeyCode::Down | KeyCode::Char('j') => self.scroll_down(),
-            KeyCode::Enter => {
-                let idx = self.stream_state.selected().unwrap_or(0);
-            }
             KeyCode::Char('g') => {
                 if self.g_char {
                     self.g_char = false;
@@ -512,7 +491,7 @@ impl App {
                         tracing::info!("in history.");
                         if let Err(e) = self.ensure_batches_loaded(0) {
                             tracing::error!("failed to load batch: {e}");
-                            return;
+                            return Err(color_eyre::eyre::eyre!("failed to load batch: {e}"));
                         }
                     }
                     self.view_port.window_start = self.loaded_range.0 * PER_BATCH_SIZE;
@@ -566,6 +545,7 @@ impl App {
                 self.g_char = false;
             }
         }
+        Ok(())
     }
 
     pub async fn run(
@@ -606,13 +586,13 @@ impl App {
             }
         });
 
-        let mut tick = tokio::time::interval(Duration::from_millis(200));
+        let mut tick = tokio::time::interval(Duration::from_millis(150));
 
         while self.running {
             tokio::select! {
                 Some(event) = input_rx.recv() => {
                     match event {
-                        Event::Key(key) => self.handle_key(key, &config_reload_tx),
+                        Event::Key(key) => self.handle_key(key, &config_reload_tx)?,
                         Event::Mouse(mouse) => self.handle_mouse(mouse),
                         _ => {}
                     }
@@ -620,12 +600,12 @@ impl App {
 
                 Some(event) = rx.recv() => {
                     if !self.pause {
-                        self.push(event, writer_tx).await;
+                        self.push(event, writer_tx).await?;
                     }
                 }
 
                 Some(_) = batch_rx.recv() => {
-                    self.total_batches = read_batch_info().unwrap().len();
+                    self.total_batches = read_batch_info()?.len();
                 }
 
                 Some(event) = live_mode_rx.recv(), if self.follow_tail => {
@@ -679,11 +659,11 @@ impl App {
         let global = self.view_port.window_start + local;
         let next_global = global.saturating_sub(1);
 
-        if self.view_mode == ViewMode::History {
-            if let Err(e) = self.ensure_batches_loaded(next_global) {
-                tracing::error!("failed to load batch: {e}");
-                return;
-            }
+        if self.view_mode == ViewMode::History
+            && let Err(e) = self.ensure_batches_loaded(next_global)
+        {
+            tracing::error!("failed to load batch: {e}");
+            return;
         }
 
         let next_local = next_global.saturating_sub(self.view_port.window_start);
@@ -696,11 +676,11 @@ impl App {
         let global = self.view_port.window_start + local;
         let next_global = global + 1;
 
-        if self.view_mode == ViewMode::History {
-            if let Err(e) = self.ensure_batches_loaded(next_global) {
-                tracing::error!("failed to load batch: {e}");
-                return;
-            }
+        if self.view_mode == ViewMode::History
+            && let Err(e) = self.ensure_batches_loaded(next_global)
+        {
+            tracing::error!("failed to load batch: {e}");
+            return;
         }
 
         let next_local = next_global
@@ -748,10 +728,8 @@ pub fn match_query(e: &UiEvent, st: &str) -> bool {
     let detail = &e.event.detail();
     let kind = &e.event.kind_label();
 
-    if st.bytes().all(|b| b.is_ascii_digit()) {
-        if e.event.pid().to_string().contains(st) {
-            return true;
-        }
+    if st.bytes().all(|b| b.is_ascii_digit()) && e.event.pid().to_string().contains(st) {
+        return true;
     }
     detail.contains(st) || kind.contains(st)
 }

@@ -1,21 +1,13 @@
-#![allow(unused)]
-use std::process::id;
-use std::time::{Duration, Instant};
-
-use crate::app::{App, ConfigState, FILTEREVENTS, Focus, UiEvent, ViewMode};
+use crate::app::{App, ConfigState, FILTEREVENTS, UiEvent, ViewMode};
 use crate::helper::format_timestamp_ns;
-use crate::write::{BatchInfo, PER_BATCH_SIZE};
+use crate::write::PER_BATCH_SIZE;
 use crate::*;
 use bpfx::EventHeader;
-use clap::builder::Str;
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Wrap,
-};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap};
 
 const C_BG: Color = Color::Rgb(13, 17, 23); // #0d1117
 const C_BG2: Color = Color::Rgb(22, 27, 34); // #161b22
@@ -29,7 +21,6 @@ const C_PURPLE: Color = Color::Rgb(210, 168, 255); // #d2a8ff
 const C_YELLOW: Color = Color::Rgb(210, 153, 34); // #d29922
 const C_ORANGE: Color = Color::Rgb(255, 140, 0);
 const C_RED: Color = Color::Rgb(248, 81, 73); // #f85149
-const C_RED_DIM: Color = Color::Rgb(180, 40, 40);
 const C_PATH: Color = Color::Rgb(126, 231, 135); // #7ee787
 
 fn sev_color(s: &Severity) -> Color {
@@ -114,7 +105,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         x: inner.x,
         y: inner.y + 2,
         width: inner.width,
-        height: inner.height.saturating_sub(1),
+        height: inner.height.saturating_sub(2),
     };
 
     app.stream_area = inner;
@@ -154,8 +145,8 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    if app.view_mode == ViewMode::Live && app.filtered_events.len() >= PER_BATCH_SIZE {
-        tracing::info!("MOVING to history mode");
+    if app.view_mode == ViewMode::Live && app.events.len() >= PER_BATCH_SIZE {
+        tracing::info!("MOVING to history mode, len - {}", app.events.len());
         app.view_mode = ViewMode::History;
         app.current_batch = 0;
         app.view_port.window_start = 0;
@@ -169,7 +160,11 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         let sev = &event.severity;
         let is_sel = selected == i;
         let sev_col = sev_color(sev);
-        let ts = &event.timestamp;
+        let ts = format_timestamp_ns(
+            event.event.timestamp(),
+            app.twle_hr_format,
+            app.wallclock_offset_ns,
+        );
         let pid = event.event.pid();
         let kind = event.event.kind_label();
         let detail = event.event.detail();
@@ -279,9 +274,7 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(severity_block, severity_area);
 
     let rows = Layout::vertical(
-        std::iter::repeat(Constraint::Length(1))
-            .take(SEVERITY_FILTERS.len())
-            .collect::<Vec<_>>(),
+        std::iter::repeat_n(Constraint::Length(1), SEVERITY_FILTERS.len()).collect::<Vec<_>>(),
     )
     .split(severity_inner);
 
@@ -294,7 +287,6 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         app.info_ev_count,
     ];
 
-    let selected = app.sev_state.selected();
     app.sev_area = severity_area;
 
     let count_width = counts
@@ -348,8 +340,6 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let filter_inner = filter_block.inner(filter_area);
     frame.render_widget(filter_block, filter_area);
     app.filter_area = filter_area;
-
-    let selected = app.filter_state.selected();
 
     let items: Vec<ListItem> = FILTEREVENTS
         .iter()
@@ -407,7 +397,6 @@ fn render_detail_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     };
 
-    let rules = event.event.rule_name();
     let lines = build_detail_lines(event, app);
     frame.render_widget(
         Paragraph::new(lines)
@@ -444,6 +433,7 @@ fn uid_label(uid: u32) -> String {
 fn uid_color(uid: u32) -> Color {
     if uid == 0 { C_RED } else { C_TEXT }
 }
+
 fn port_color(port: u16) -> Color {
     match port {
         22 | 443 | 80 => C_GREEN,
@@ -506,7 +496,13 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
     let rules = event.event.rule_name();
 
     let sev = &event.severity;
-    let sev_col = sev_color(&sev);
+    let sev_col = sev_color(sev);
+
+    let timestamp = format_timestamp_ns(
+        event.event.timestamp(),
+        app.twle_hr_format,
+        app.wallclock_offset_ns,
+    );
 
     lines.push(Line::from(vec![
         Span::styled(
@@ -520,7 +516,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
         ),
     ]));
     lines.push(Line::from(Span::styled(
-        event.timestamp.clone(),
+        timestamp,
         Style::default().fg(C_MUTED),
     )));
     lines.push(Line::from(""));
@@ -542,7 +538,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 uid_color(e.event.header.uid),
             );
             kv(&mut lines, "filename ", &e.event.filename, C_PATH);
-            kv(&mut lines, "comm ", &&e.event.header.comm, C_PATH);
+            kv(&mut lines, "comm ", &e.event.header.comm, C_PATH);
         }
         AppEvent::ProcessExit(e) => {
             let ok = e.event.exit_code >= 0;
@@ -554,7 +550,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 &e.event.header.ppid.to_string(),
                 C_TEXT,
             );
-            kv(&mut lines, "comm ", &&e.event.header.comm, C_PATH);
+            kv(&mut lines, "comm ", &e.event.header.comm, C_PATH);
             kv(
                 &mut lines,
                 "retval",
@@ -574,14 +570,14 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 &e.event.child_pid.to_string(),
                 C_TEXT,
             );
-            kv(&mut lines, "child comm ", &&e.event.child_comm, C_PATH);
+            kv(&mut lines, "child comm ", &e.event.child_comm, C_PATH);
             kv(
                 &mut lines,
                 "parent pid ",
                 &e.event.parent.pid.to_string(),
                 C_TEXT,
             );
-            kv(&mut lines, "parent comm ", &&e.event.parent.comm, C_PATH);
+            kv(&mut lines, "parent comm ", &e.event.parent.comm, C_PATH);
             kv(
                 &mut lines,
                 "ppid ",

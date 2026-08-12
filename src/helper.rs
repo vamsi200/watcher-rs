@@ -60,9 +60,11 @@ pub fn format_timestamp_ns(ns: u64, use_24hr: bool, wallclock_ns: u64) -> String
     let secs = (wallclock_ns / 1_000_000_000) as i64;
     let nanos = (wallclock_ns % 1_000_000_000) as u32;
 
-    let dt = DateTime::from_timestamp(secs, nanos)
-        .unwrap()
-        .with_timezone(&Local);
+    let Some(dt) = DateTime::from_timestamp(secs, nanos) else {
+        return String::new();
+    };
+
+    let dt = dt.with_timezone(&Local);
 
     if use_24hr {
         dt.format("%H:%M:%S%.3f").to_string()
@@ -120,22 +122,4 @@ pub fn is_root_only_path(filename: &str) -> bool {
         "/proc/kcore",
     ];
     ROOT_ONLY.iter().any(|&p| filename.starts_with(p))
-}
-
-pub fn parse_uptime() -> String {
-    let mut file = File::open("/proc/uptime").unwrap();
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).unwrap();
-    let uptime_secs = buf
-        .split('.')
-        .next()
-        .expect("Failed to parse uptime")
-        .parse::<u64>()
-        .unwrap();
-
-    let hours = uptime_secs / 3600;
-    let minutes = uptime_secs % 3600 / 60;
-    let secs = uptime_secs % 60;
-    let out_string = format!("{hours}:{minutes}:{secs}");
-    out_string
 }

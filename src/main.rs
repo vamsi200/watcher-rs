@@ -1,55 +1,28 @@
-#![allow(unused)]
 use bpfx::{
-    Bpfx, FileEvent, FileFilter, FileMask, FileTypeFilter, NetworkEvent, NetworkFilter,
-    NetworkMask, ProcessEvent, ProcessFilter, ProcessMask,
+    Bpfx, FileEvent, FileFilter, FileMask, NetworkEvent, NetworkFilter, NetworkMask, ProcessEvent,
+    ProcessFilter, ProcessMask,
 };
 use clap::Subcommand;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::EnableMouseCapture;
 use crossterm::execute;
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode};
+use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use detection::*;
 use futures::StreamExt;
-use futures::channel::oneshot;
-use libc::{setgid, setuid};
-use lru::LruCache;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, restore};
-use std::fs::{self, File, OpenOptions, create_dir, exists};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::IpAddr;
-use std::str::FromStr;
-use std::{
-    collections::{HashMap, HashSet},
-    hash::{Hash, Hasher},
-    io::stdout,
-    net::{Ipv4Addr, Ipv6Addr},
-    num::NonZeroUsize,
-    ptr::read,
-    thread::sleep,
-    time::Duration,
-};
+use std::fs;
+use std::io::stdout;
 use std::{path::PathBuf, sync::LazyLock};
 use tokio::sync::mpsc::Receiver;
-use tokio::task::JoinHandle;
-use tokio::{
-    io::unix::AsyncFd,
-    signal::ctrl_c,
-    sync::{mpsc::Sender, watch},
-};
-use toml::value;
+use tokio::sync::{mpsc::Sender, watch};
+use watcher_rs::app::{App, writer_thread};
 use watcher_rs::app::{ConfigState, UiEvent};
 use watcher_rs::gen_db::{drop_privleges, parse_ipsum, update_ipsum_db};
-use watcher_rs::write::{LogConfig, RuntimeLogConfig};
+use watcher_rs::write::RuntimeLogConfig;
 use watcher_rs::*;
-use watcher_rs::{
-    app::{App, writer_thread},
-    helper::format_timestamp_ns,
-};
 
 use clap::Parser;
-use color_eyre::eyre::{Context, Result};
-use directories::ProjectDirs;
-use tracing::error;
+use color_eyre::eyre::Result;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{self, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -175,9 +148,9 @@ async fn read_events<'a>(
                 if let Ok(rule_config) = write_path_config() {
                     tracing::info!("got new config");
                     classifier.rules = Some(rule_config);
-                    config_tx.send(ConfigState::ConfigReloaded).await;
+                    config_tx.send(ConfigState::ConfigReloaded).await?;
                 }else{
-                    config_tx.send(ConfigState::ConfigReloadFailed).await;
+                    config_tx.send(ConfigState::ConfigReloadFailed).await?;
                 }
             }
 
@@ -328,7 +301,7 @@ async fn read_events<'a>(
                         }
                     }
 
-                    NetworkEvent::Bind(e) => {
+                     NetworkEvent::Bind(e) => {
                         let event = classifier.classify_bind(e);
                         if tx.send(AppEvent::NetworkBind(event)).await.is_err() {
                             return Ok(());
@@ -361,13 +334,13 @@ async fn read_events<'a>(
 }
 
 async fn start_ui(
-    mut rx: Receiver<AppEvent>,
+    rx: Receiver<AppEvent>,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
     writer_tx: &tokio::sync::mpsc::Sender<UiEvent>,
-    mut batch_ready_rx: tokio::sync::mpsc::Receiver<bool>,
-    mut live_mode_rx: tokio::sync::mpsc::Receiver<UiEvent>,
-    mut config_watcher_tx: watch::Sender<bool>,
-    mut config_rx: Receiver<ConfigState>,
+    batch_ready_rx: tokio::sync::mpsc::Receiver<bool>,
+    live_mode_rx: tokio::sync::mpsc::Receiver<UiEvent>,
+    config_watcher_tx: watch::Sender<bool>,
+    config_rx: Receiver<ConfigState>,
 ) -> color_eyre::Result<()> {
     let mut stdout = stdout();
 
@@ -376,7 +349,7 @@ async fn start_ui(
 
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
-    let mut app = App::new();
+    let app = App::new();
 
     app.run(
         terminal,
@@ -388,62 +361,59 @@ async fn start_ui(
         config_watcher_tx,
         config_rx,
     )
-    .await
-    .unwrap();
+    .await?;
 
     restore();
 
     Ok(())
 }
 
-fn start_collectors(
+async fn start_collectors(
     writer_ready_tx: tokio::sync::oneshot::Sender<()>,
-    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
-    mut config_watcher_rx: watch::Receiver<bool>,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    config_watcher_rx: watch::Receiver<bool>,
     tx: tokio::sync::mpsc::Sender<AppEvent>,
     config_tx: Sender<ConfigState>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::task::spawn(async move {
-        let mut bpf = Bpfx::new().unwrap();
+) -> color_eyre::Result<()> {
+    let mut bpf = Bpfx::new()?;
 
-        let process_filter = ProcessFilter {
-            mask: ProcessMask::ALL,
-            ..Default::default()
-        };
+    let process_filter = ProcessFilter {
+        mask: ProcessMask::ALL,
+        ..Default::default()
+    };
 
-        let file_filter = FileFilter {
-            event_type: FileMask::ALL,
-            ..Default::default()
-        };
+    let file_filter = FileFilter {
+        event_type: FileMask::ALL,
+        ..Default::default()
+    };
 
-        let network_filter = NetworkFilter {
-            event_mask: NetworkMask::ALL,
-            ..Default::default()
-        };
+    let network_filter = NetworkFilter {
+        event_mask: NetworkMask::ALL,
+        ..Default::default()
+    };
 
-        let sources = EventSources {
-            process: bpf.subscribe(process_filter).unwrap(),
-            file: bpf.subscribe(file_filter).unwrap(),
-            network: bpf.subscribe(network_filter).unwrap(),
-            state_path: STATE_PATH.as_ref(),
-        };
+    let sources = EventSources {
+        process: bpf.subscribe(process_filter)?,
+        file: bpf.subscribe(file_filter)?,
+        network: bpf.subscribe(network_filter)?,
+        state_path: STATE_PATH.as_ref(),
+    };
 
-        if let Err(e) = drop_privleges() {
-            eprintln!("failed to drop privileges: {e}");
-        }
+    drop_privleges()?;
 
-        writer_ready_tx.send(());
+    writer_ready_tx
+        .send(())
+        .map_err(|_| color_eyre::eyre::eyre!("failed to send ready status"))?;
 
-        init().unwrap();
+    init()?;
 
-        let runtime = bpf.run();
+    let runtime = bpf.run();
 
-        if let Err(e) = read_events(tx, shutdown_rx, sources, config_watcher_rx, &config_tx).await {
-            eprintln!("{e}");
-        }
+    read_events(tx, shutdown_rx, sources, config_watcher_rx, &config_tx).await?;
 
-        drop(runtime);
-    })
+    drop(runtime);
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -455,7 +425,7 @@ async fn main() -> color_eyre::Result<()> {
 
     match args.command {
         Some(Command::UpdateDb) => {
-            update_ipsum_db().unwrap();
+            update_ipsum_db()?;
             return Ok(());
         }
         None => {}
@@ -475,19 +445,23 @@ async fn main() -> color_eyre::Result<()> {
 
     let (config_watcher_tx, config_watcher_rx) = watch::channel::<bool>(false);
 
-    let (config_tx, mut config_rx) = tokio::sync::mpsc::channel::<ConfigState>(100);
+    let (config_tx, config_rx) = tokio::sync::mpsc::channel::<ConfigState>(100);
 
-    let collector_handle = start_collectors(
-        writer_ready_tx,
-        shutdown_rx,
-        config_watcher_rx,
-        tx,
-        config_tx,
-    );
+    tokio::spawn(async move {
+        if let Err(e) = start_collectors(
+            writer_ready_tx,
+            shutdown_rx,
+            config_watcher_rx,
+            tx,
+            config_tx,
+        )
+        .await
+        {
+            tracing::error!(?e, "collector failed");
+        }
+    });
 
-    tracing::info!("collector spawned");
-
-    let runtime_log_config = RuntimeLogConfig::from(get_log_config().unwrap());
+    let runtime_log_config = RuntimeLogConfig::from(get_log_config()?);
 
     tokio::spawn(async move {
         if writer_ready_rx.await.is_err() {
@@ -505,7 +479,9 @@ async fn main() -> color_eyre::Result<()> {
 
     tokio::spawn(async move {
         if let Err(e) = tokio::task::spawn_blocking(|| {
-            parse_ipsum(STATE_PATH.as_ref(), false);
+            if parse_ipsum(STATE_PATH.as_ref(), false).is_err() {
+                eprintln!("failed to parse ipsum db..")
+            }
         })
         .await
         {
@@ -524,7 +500,5 @@ async fn main() -> color_eyre::Result<()> {
     )
     .await?;
 
-    tracing::info!("MAIN ABOUT TO RETURN");
-    std::process::exit(0);
     Ok(())
 }

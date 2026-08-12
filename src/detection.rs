@@ -1,27 +1,14 @@
-#![allow(unused)]
-use crate::gen_db::{ArchivedIpsumDb, IpsumDb};
-use crate::helper::{bytes_to_str, check_path, is_root_only_path, parse_addr};
+use crate::Severity;
+use crate::gen_db::ArchivedIpsumDb;
 use crate::*;
-use crate::{PrivilegeEvent, Severity, helper::is_sensitive_path};
 use bpfx::EventHeader;
 use bpfx::{FileEvent, process::ProcessStartEvent};
-use clap::builder::Str;
-use futures::lock::Mutex;
-use libc::O_TRUNC;
 use lru::LruCache;
 use rkyv::rancor::Error;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::io::Read;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
-use std::os::unix::fs::PermissionsExt;
-use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use std::{
-    fs::{self, File},
-    path::{self, PathBuf},
-};
-use tracing_subscriber::Layer;
 
 macro_rules! impl_file_header {
     () => {
@@ -225,6 +212,12 @@ pub struct FileEventFilter {
     filter: LruCache<FileKey, Aggregate>,
 }
 
+impl Default for FileEventFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileEventFilter {
     pub fn new() -> Self {
         let lru_cache: LruCache<FileKey, Aggregate> =
@@ -248,7 +241,7 @@ impl FileEventFilter {
                 }
                 val.last_seen = now;
                 val.count += 1;
-                return false;
+                false
             }
 
             None => {
@@ -259,11 +252,9 @@ impl FileEventFilter {
                         count: 1,
                     },
                 );
-                return false;
+                false
             }
         }
-
-        false
     }
 }
 
@@ -284,12 +275,6 @@ pub struct Aggregate {
     last_seen: Instant,
     count: u64,
 }
-
-const HIGH_FREQ_THRESHOLD: usize = 50;
-const MED_FREQ_THRESHOLD: usize = 20;
-const HIGH_CONN_THRESHOLD: usize = 100;
-const MED_CONN_THRESHOLD: usize = 40;
-const TIME_WINDOW_NS: u64 = 1_000_000_000;
 
 pub const PATH_SEVERITY: &[(&str, Severity)] = &[
     // Critical
@@ -350,11 +335,11 @@ pub const PATH_SEVERITY: &[(&str, Severity)] = &[
     ("/var/lib/", Severity::Low),
 ];
 
-const SUSPICIOUS_FLAGS: &[(i32, &str)] = &[
-    (libc::O_WRONLY | libc::O_TRUNC, "truncating sensitive file"),
-    (libc::O_RDWR | libc::O_CREAT, "creating file with RW access"),
-    (libc::O_WRONLY | libc::O_APPEND, "appending to file"),
-];
+// const SUSPICIOUS_FLAGS: &[(i32, &str)] = &[
+//     (libc::O_WRONLY | libc::O_TRUNC, "truncating sensitive file"),
+//     (libc::O_RDWR | libc::O_CREAT, "creating file with RW access"),
+//     (libc::O_WRONLY | libc::O_APPEND, "appending to file"),
+// ];
 
 pub const SUSPICIOUS_PORTS: &[(u16, Severity)] = &[
     (23, Severity::Medium),
@@ -387,40 +372,40 @@ pub const SUSPICIOUS_PORTS: &[(u16, Severity)] = &[
 ];
 
 //TODO: Use this
-const INPUT_DEVICE_PATHS: &[(&str, &str, Severity)] = &[
-    (
-        "/dev/input/",
-        "Raw input device access (possible keylogger)",
-        Severity::High,
-    ),
-    ("/dev/tty", "TTY device access", Severity::Medium),
-    ("/dev/pts/", "Pseudo-terminal access", Severity::Medium),
-    ("/dev/hidraw", "Raw HID device access", Severity::High),
-    (
-        "/dev/uinput",
-        "uinput device (can inject input events)",
-        Severity::High,
-    ),
-    (
-        "/dev/input/mice",
-        "Mouse aggregator device",
-        Severity::Medium,
-    ),
-    ("/dev/input/mouse", "Raw mouse device", Severity::Medium),
-    (
-        "/dev/input/event",
-        "Raw keyboard/input event device",
-        Severity::High,
-    ),
-];
-
-const SUSPICIOUS_INPUT_FLAGS: &[(i32, &str)] = &[
-    (
-        libc::O_WRONLY,
-        "Write access to input device (input injection)",
-    ),
-    (libc::O_RDWR, "Read-write access to input device"),
-];
+// const INPUT_DEVICE_PATHS: &[(&str, &str, Severity)] = &[
+//     (
+//         "/dev/input/",
+//         "Raw input device access (possible keylogger)",
+//         Severity::High,
+//     ),
+//     ("/dev/tty", "TTY device access", Severity::Medium),
+//     ("/dev/pts/", "Pseudo-terminal access", Severity::Medium),
+//     ("/dev/hidraw", "Raw HID device access", Severity::High),
+//     (
+//         "/dev/uinput",
+//         "uinput device (can inject input events)",
+//         Severity::High,
+//     ),
+//     (
+//         "/dev/input/mice",
+//         "Mouse aggregator device",
+//         Severity::Medium,
+//     ),
+//     ("/dev/input/mouse", "Raw mouse device", Severity::Medium),
+//     (
+//         "/dev/input/event",
+//         "Raw keyboard/input event device",
+//         Severity::High,
+//     ),
+// ];
+//
+// const SUSPICIOUS_INPUT_FLAGS: &[(i32, &str)] = &[
+//     (
+//         libc::O_WRONLY,
+//         "Write access to input device (input injection)",
+//     ),
+//     (libc::O_RDWR, "Read-write access to input device"),
+// ];
 
 pub struct RuleContext<'a> {
     pub process_cache: &'a HashMap<u32, ProcessInfo>,
@@ -667,6 +652,12 @@ pub struct Classifier {
     pub rules: Option<Rules>,
 }
 
+impl Default for Classifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Classifier {
     pub fn new() -> Self {
         Self {
@@ -782,7 +773,7 @@ impl Rule for SuspiciousPortsConfig {
 pub struct SuspiciousIpRule;
 
 impl SuspiciousIpRule {
-    fn check<'a, T>(&self, event: &T, file_bytes: &'a [u8]) -> Option<Severity>
+    fn check<T>(&self, event: &T, file_bytes: &[u8]) -> Option<Severity>
     where
         T: NetworkCommon,
     {
@@ -946,7 +937,7 @@ pub struct BindConnRules;
 impl BindConnRules {
     fn check(&self, event: &BindEvent, _: &RuleContext) -> Option<Severity> {
         if event.endpoints.local_ip.is_unspecified() || event.endpoints().local_port < 1024 {
-            return Some(Severity::Low);
+            Some(Severity::Low)
         } else {
             None
         }
