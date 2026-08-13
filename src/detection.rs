@@ -121,6 +121,7 @@ macro_rules! generic_file_impl {
 
         impl HasFlags for $type {
             impl_file_flags!();
+            impl_file_flags_string!();
         }
 
         impl HasWrite for $type {
@@ -137,10 +138,6 @@ macro_rules! impl_network_common {
 
         fn header(&self) -> &EventHeader {
             &self.header
-        }
-
-        fn protocol(&self) -> &Protocol {
-            &self.protocol
         }
     };
 }
@@ -200,6 +197,20 @@ pub struct Rules {
     pub suspicious_exec_path: Option<SuspiciousExecPathConfig>,
     pub suspicious_ports: Option<SuspiciousPortsConfig>,
     pub ignore_pids: Option<IgnorePidsConfig>,
+    pub ignore_comm_name: Option<IgnoreCommName>,
+    pub ignore_exe_path: Option<IgnoreExePath>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct IgnoreExePath {
+    pub enabled: bool,
+    pub paths: Vec<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct IgnoreCommName {
+    pub enabled: bool,
+    pub names: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -432,10 +443,10 @@ pub enum Event<'a> {
     ProcessStart(&'a ProcessStartEvent),
     ProcessExit(&'a ProcessExitEvent),
     ProcessFork(&'a ProcessForkEvent),
-    Accept(&'a AcceptEvent),
-    Connect(&'a ConnectEvent),
-    Bind(&'a BindEvent),
-    Listen(&'a ListenEvent),
+    NetworkAccept(&'a AcceptEvent),
+    NetworkConnect(&'a ConnectEvent),
+    NetworkBind(&'a BindEvent),
+    NetworkListen(&'a ListenEvent),
     NetworkClose(&'a CloseEvent),
 }
 
@@ -460,10 +471,10 @@ impl RuleEngine {
     classify!(classify_process_exit, ProcessExit, ProcessExitEvent);
     classify!(classify_process_fork, ProcessFork, ProcessForkEvent);
 
-    classify!(classify_accept, Accept, AcceptEvent);
-    classify!(classify_connect, Connect, ConnectEvent);
-    classify!(classify_bind, Bind, BindEvent);
-    classify!(classify_listen, Listen, ListenEvent);
+    classify!(classify_accept, NetworkAccept, AcceptEvent);
+    classify!(classify_connect, NetworkConnect, ConnectEvent);
+    classify!(classify_bind, NetworkBind, BindEvent);
+    classify!(classify_listen, NetworkListen, ListenEvent);
     classify!(classify_network_close, NetworkClose, CloseEvent);
 }
 
@@ -647,7 +658,7 @@ impl Rule for TempExecutableRule {
 
 pub struct Classifier {
     pub ipsum_file_bytes: Option<Vec<u8>>,
-    pub process_map: HashMap<u32, ProcessInfo>, //TODO: unimplemented!()
+    pub process_map: HashMap<u32, ProcessInfo>,
     pub engine: RuleEngine,
     pub rules: Option<Rules>,
 }
@@ -712,7 +723,6 @@ impl Classifier {
 trait NetworkCommon {
     fn endpoints(&self) -> &SocketEndpoints;
     fn header(&self) -> &EventHeader;
-    fn protocol(&self) -> &Protocol;
 }
 
 impl NetworkCommon for AcceptEvent {
@@ -767,7 +777,7 @@ impl Rule for SuspiciousPortsConfig {
         "SuspiciousPort"
     }
 
-    match_event!(Accept, Connect);
+    match_event!(NetworkAccept, NetworkConnect);
 }
 
 pub struct SuspiciousIpRule;
@@ -835,8 +845,9 @@ impl Rule for SuspiciousIpRule {
     fn check(&self, event: Event, ctx: &RuleContext) -> Option<Severity> {
         if let Some(file_bytes) = ctx.ipsum_bytes {
             match event {
-                Event::Accept(e) => self.check(e, file_bytes),
-                Event::Connect(e) => self.check(e, file_bytes),
+                //TODO:
+                Event::NetworkAccept(e) => self.check(e, file_bytes),
+                Event::NetworkConnect(e) => self.check(e, file_bytes),
                 _ => None,
             }
         } else {
@@ -915,7 +926,7 @@ impl Rule for IpClassificationRule {
         "IpClassification"
     }
 
-    match_event!(Bind, Listen, Connect, Accept);
+    match_event!(NetworkBind, NetworkListen, NetworkConnect, NetworkAccept);
 }
 
 pub struct RunAsRootRule;
@@ -929,7 +940,7 @@ impl Rule for RunAsRootRule {
         "RunAsRoot"
     }
 
-    match_event!(Listen, Connect);
+    match_event!(NetworkListen, NetworkConnect);
 }
 
 pub struct BindConnRules;
@@ -949,7 +960,7 @@ impl Rule for BindConnRules {
         "GenericBindRule"
     }
 
-    match_event!(Bind);
+    match_event!(NetworkBind);
 }
 
 trait ProcessCommon {
@@ -1001,7 +1012,7 @@ impl SuspiciousExecPathConfig {
             config.paths.iter().find_map(|(severity, paths)| {
                 paths
                     .iter()
-                    .any(|path| get_exe(event.header().pid).starts_with(path))
+                    .any(|path| read_exe(event.header().pid).starts_with(path))
                     .then_some(*severity)
             })
         } else {

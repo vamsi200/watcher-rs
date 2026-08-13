@@ -9,7 +9,7 @@ pub mod write;
 pub use bpfx::{file::*, network::*, process::*};
 use directories::ProjectDirs;
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions, create_dir, exists, read_link};
+use std::fs::{self, File, OpenOptions, create_dir, exists};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -99,6 +99,24 @@ pub static RULE_CONFIG: LazyLock<Rules> = LazyLock::new(|| match write_path_conf
     }
 });
 
+pub fn read_path_config() -> color_eyre::eyre::Result<Rules> {
+    let config_path = CONFIG_DIR_PATH
+        .as_ref()
+        .ok_or_else(|| color_eyre::eyre::eyre!("Failed to get config directory"))?;
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(config_path.join("rules.toml"))?;
+
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)?;
+
+    let rule_config = toml::from_str::<Rules>(&buf)
+        .map_err(|e| color_eyre::eyre::eyre!("invalid rules.toml: {e}"))?;
+
+    Ok(rule_config)
+}
+
 pub fn write_path_config() -> color_eyre::eyre::Result<Rules> {
     let mut file = open_rules_file()?;
     let mut buf = String::new();
@@ -149,6 +167,8 @@ pub fn write_path_config() -> color_eyre::eyre::Result<Rules> {
         suspicious_exec_path: Some(sus_exec_config),
         suspicious_ports: Some(sus_port_config),
         ignore_pids: None,
+        ignore_comm_name: None,
+        ignore_exe_path: None,
     };
 
     let toml = toml::to_string_pretty(&config)?;
@@ -253,30 +273,8 @@ pub struct ProcessInfo {
     pub comm: String,
 }
 
-pub fn get_exe(pid: u32) -> PathBuf {
-    read_link(format!("/proc/{}/exe", pid)).unwrap_or_default()
-}
-
-#[derive(
-    Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-)]
-pub struct PrivilegeEvent {
-    pub pid: u32,
-    pub uid: u32,
-    pub binary: String,
-    pub is_setuid: bool,
-    pub timestamp: u64,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, PartialOrd, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-)]
-pub struct SuspiciousEvent {
-    pub pid: u32,
-    pub file: String,
-    pub reason: String,
-    pub severity: Severity,
-    pub timestamp: u64,
+pub fn read_exe(pid: u32) -> PathBuf {
+    std::fs::read_link(format!("/proc/{pid}/exe")).unwrap_or_default()
 }
 
 #[derive(

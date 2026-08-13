@@ -1,29 +1,12 @@
-#![allow(unused)]
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, Write},
     path::PathBuf,
-    thread::panicking,
 };
 
-use libc::locale_t;
-use rkyv::{
-    Archive,
-    bytecheck::CheckBytes,
-    de::Pool,
-    rancor::{Error, Strategy},
-    to_bytes,
-    util::AlignedVec,
-};
-use tokio::sync::mpsc::Sender;
+use rkyv::{rancor::Error, to_bytes, util::AlignedVec};
 
-use crate::{
-    AppEvent, PrivilegeEvent, ProcessEvent, STATE_PATH, SuspiciousEvent, app::UiEvent,
-    project_directory,
-};
-use bpfx::file::*;
-use bpfx::network::*;
-use bpfx::process::*;
+use crate::{STATE_PATH, app::UiEvent};
 
 pub const PER_BATCH_SIZE: usize = 1000;
 
@@ -124,7 +107,7 @@ pub fn read_batch_info() -> color_eyre::Result<Vec<BatchInfo>, color_eyre::eyre:
 
         let len = u32::from_le_bytes(len) as usize;
         let mut content = vec![0; len];
-        file.read_exact(&mut content);
+        file.read_exact(&mut content)?;
 
         let event = rkyv::from_bytes::<BatchInfo, Error>(&content)?;
         info.push(event);
@@ -176,16 +159,16 @@ pub fn write_to_disk(path: &PathBuf, bytes: AlignedVec) -> color_eyre::eyre::Res
 
 #[test]
 fn test_write() {
-    let mut events: Vec<AppEvent> = Vec::new();
-    let event_header = bpfx::EventHeader {
-        timestamp_ns: 123,
-        pid: 1,
-        tid: 23,
-        ppid: 345,
-        uid: 123,
-        gid: 123,
-        comm: String::new(),
-    };
+    // let events: Vec<AppEvent> = Vec::new();
+    // let event_header = bpfx::EventHeader {
+    //     timestamp_ns: 123,
+    //     pid: 1,
+    //     tid: 23,
+    //     ppid: 345,
+    //     uid: 123,
+    //     gid: 123,
+    //     comm: String::new(),
+    // };
 
     // events.push(AppEvent::ProcessStart(ProcessStartEvent {
     //     header: event_header,

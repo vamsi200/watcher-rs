@@ -1,6 +1,6 @@
 use bpfx::{
-    Bpfx, FileEvent, FileFilter, FileMask, NetworkEvent, NetworkFilter, NetworkMask, ProcessEvent,
-    ProcessFilter, ProcessMask,
+    Bpfx, BpfxConfig, FileEvent, FileFilter, FileMask, NetworkEvent, NetworkFilter, NetworkMask,
+    ProcessEvent, ProcessFilter, ProcessMask,
 };
 use clap::Subcommand;
 use crossterm::event::EnableMouseCapture;
@@ -10,6 +10,7 @@ use detection::*;
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, restore};
+use std::collections::HashMap;
 use std::fs;
 use std::io::stdout;
 use std::{path::PathBuf, sync::LazyLock};
@@ -17,7 +18,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc::Sender, watch};
 use watcher_rs::app::{App, writer_thread};
 use watcher_rs::app::{ConfigState, UiEvent};
-use watcher_rs::gen_db::{drop_privleges, parse_ipsum, update_ipsum_db};
+use watcher_rs::gen_db::{drop_privileges, parse_ipsum, regain_privs, update_ipsum_db};
 use watcher_rs::write::RuntimeLogConfig;
 use watcher_rs::*;
 
@@ -137,6 +138,9 @@ async fn read_events<'a>(
         classifier.rules = Some(rule_config.clone());
     }
 
+    classifier.process_map = HashMap::new();
+
+    regain_privs()?;
     loop {
         tokio::select! {
             _ = sh_rx.changed() => {
@@ -155,13 +159,34 @@ async fn read_events<'a>(
             }
 
             Some(event) = sources.process.next() => {
-                if let Some(ref config) = classifier.rules {
-                    if let Some(ref config) = config.ignore_pids{
-                        if config.enabled && config.pids.iter().any(|s| event.header().pid == *s) {
+                  if let Some(ref config) = classifier.rules {
+                    if let Some(ref config) = config.ignore_pids && config.enabled{
+                        if config.pids.iter().any(|s| event.header().pid == *s) {
                             continue;
                         }
                     }
+
+                    if let Some(ref config) = config.ignore_comm_name && config.enabled {
+                        if config.names.iter().any(|s| event.header().comm.starts_with(s)) {
+                            continue;
+                        }
+
+                    }
+
+                    if let Some(ref config) = config.ignore_exe_path && config.enabled {
+                        if config.paths.iter().any(|s| read_exe(event.header().pid).starts_with(s)) {
+                            continue;
+                        }
+                    }
+
                 }
+
+                classifier.process_map.insert(event.header().pid, ProcessInfo {
+                    uid: event.header().uid,
+                    exe: read_exe(event.header().pid),
+                    comm: event.header().comm.clone()
+                });
+
                 match event {
                     ProcessEvent::Start(e) => {
                         let e = classifier.classify_process_start(e);
@@ -178,6 +203,7 @@ async fn read_events<'a>(
                     }
 
                     ProcessEvent::Exit(e) => {
+                        classifier.process_map.remove(&e.header.pid);
                         let e = classifier.classify_process_exit(e);
                         if tx.send(AppEvent::ProcessExit(e)).await.is_err() {
                             return Ok(());
@@ -190,12 +216,27 @@ async fn read_events<'a>(
 
             Some(event) = sources.file.next() => {
                if let Some(ref config) = classifier.rules {
-                    if let Some(ref config) = config.ignore_pids{
-                        if config.enabled && config.pids.iter().any(|s| event.header().pid == *s) {
+                    if let Some(ref config) = config.ignore_pids && config.enabled{
+                        if config.pids.iter().any(|s| event.header().pid == *s) {
                             continue;
                         }
                     }
+
+                    if let Some(ref config) = config.ignore_comm_name && config.enabled {
+                        if config.names.iter().any(|s| event.header().comm.starts_with(s)) {
+                            continue;
+                        }
+
+                    }
+
+                    if let Some(ref config) = config.ignore_exe_path && config.enabled {
+                        if config.paths.iter().any(|s| read_exe(event.header().pid).starts_with(s)) {
+                            continue;
+                        }
+                    }
+
                 }
+
 
                 if let Some(inode) = event.inode(){
                     let filter_key = FileKey {
@@ -222,6 +263,13 @@ async fn read_events<'a>(
                     }
                 }
 
+                 classifier.process_map.insert(event.header().pid, ProcessInfo {
+                    uid: event.header().uid,
+                    exe: read_exe(event.header().pid),
+                    comm: event.header().comm.clone()
+                });
+
+
                 match event {
                     FileEvent::Open(e) => {
                         let event = classifier.classify_open(e);
@@ -232,6 +280,7 @@ async fn read_events<'a>(
                     }
 
                     FileEvent::Close(e) => {
+                        classifier.process_map.remove(&e.header.pid);
                         let event = classifier.classify_close(e);
 
                         if tx.send(AppEvent::FileClose(event)).await.is_err() {
@@ -278,12 +327,33 @@ async fn read_events<'a>(
 
             Some(event) = sources.network.next() => {
                if let Some(ref config) = classifier.rules {
-                    if let Some(ref config) = config.ignore_pids{
-                        if config.enabled && config.pids.iter().any(|s| event.header().pid == *s) {
+                    if let Some(ref config) = config.ignore_pids && config.enabled{
+                        if config.pids.iter().any(|s| event.header().pid == *s) {
                             continue;
                         }
                     }
+
+                    if let Some(ref config) = config.ignore_comm_name && config.enabled {
+                        if config.names.iter().any(|s| event.header().comm.starts_with(s)) {
+                            continue;
+                        }
+
+                    }
+
+                     if let Some(ref config) = config.ignore_exe_path && config.enabled {
+                        if config.paths.iter().any(|s| read_exe(event.header().pid).starts_with(s)) {
+                            continue;
+                        }
+                    }
+
                 }
+
+                classifier.process_map.insert(event.header().pid, ProcessInfo {
+                    uid: event.header().uid,
+                    exe: read_exe(event.header().pid),
+                    comm: event.header().comm.clone()
+                });
+
 
                 match event {
                     NetworkEvent::Accept(e) => {
@@ -309,6 +379,7 @@ async fn read_events<'a>(
                     }
 
                     NetworkEvent::Close(e) => {
+                        classifier.process_map.remove(&e.header.pid);
                         let event = classifier.classify_network_close(e);
                         if tx.send(AppEvent::NetworkClose(event)).await.is_err() {
                             return Ok(());
@@ -327,6 +398,11 @@ async fn read_events<'a>(
             }
 
             else => break,
+        }
+
+        if classifier.process_map.len() >= 5000 {
+            tracing::info!("clearing process_map");
+            classifier.process_map.clear();
         }
     }
 
@@ -375,7 +451,11 @@ async fn start_collectors(
     tx: tokio::sync::mpsc::Sender<AppEvent>,
     config_tx: Sender<ConfigState>,
 ) -> color_eyre::Result<()> {
-    let mut bpf = Bpfx::new()?;
+    let config = BpfxConfig {
+        channel_capacity: 10000,
+    };
+
+    let mut bpf = Bpfx::with_config(config)?;
 
     let process_filter = ProcessFilter {
         mask: ProcessMask::ALL,
@@ -399,7 +479,7 @@ async fn start_collectors(
         state_path: STATE_PATH.as_ref(),
     };
 
-    drop_privleges()?;
+    drop_privileges()?;
 
     writer_ready_tx
         .send(())

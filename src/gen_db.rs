@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
 };
 
-use libc::{setgid, setuid};
+use libc::seteuid;
 use rkyv::{rancor::Error, to_bytes};
 
 use crate::STATE_PATH;
@@ -30,23 +30,25 @@ pub struct IpsumDb {
     pub v6: Box<[EntryV6]>,
 }
 
-pub fn drop_privleges() -> color_eyre::Result<()> {
+pub fn drop_privileges() -> color_eyre::Result<()> {
     tracing::info!("dropping privileges..");
-    let gid = std::env::var("SUDO_GID").ok();
-    let uid = std::env::var("SUDO_UID").ok();
 
-    if let Some(gid) = gid
-        && let Some(uid) = uid
-    {
-        unsafe {
-            setgid(u32::from_str(&gid)?);
-            setuid(u32::from_str(&uid)?);
-        }
-    } else {
-        return Err(color_eyre::eyre::eyre!("Failed to get gid and uid"));
+    let uid = std::env::var("SUDO_UID")?.parse::<u32>()?;
+
+    // Change the effective ID.
+    // Real ID remain root, allowing us to regain later.
+    unsafe {
+        seteuid(uid);
     }
-
     Ok(())
+}
+
+pub fn regain_privs() -> color_eyre::Result<()> {
+    tracing::info!("getting root privs back");
+    unsafe {
+        seteuid(0);
+        Ok(())
+    }
 }
 
 pub fn parse_ipsum(path: Option<&PathBuf>, update: bool) -> color_eyre::Result<()> {
