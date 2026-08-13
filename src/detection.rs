@@ -346,12 +346,6 @@ pub const PATH_SEVERITY: &[(&str, Severity)] = &[
     ("/var/lib/", Severity::Low),
 ];
 
-// const SUSPICIOUS_FLAGS: &[(i32, &str)] = &[
-//     (libc::O_WRONLY | libc::O_TRUNC, "truncating sensitive file"),
-//     (libc::O_RDWR | libc::O_CREAT, "creating file with RW access"),
-//     (libc::O_WRONLY | libc::O_APPEND, "appending to file"),
-// ];
-
 pub const SUSPICIOUS_PORTS: &[(u16, Severity)] = &[
     (23, Severity::Medium),
     (512, Severity::High),
@@ -382,41 +376,43 @@ pub const SUSPICIOUS_PORTS: &[(u16, Severity)] = &[
     (9150, Severity::Medium),
 ];
 
-//TODO: Use this
-// const INPUT_DEVICE_PATHS: &[(&str, &str, Severity)] = &[
-//     (
-//         "/dev/input/",
-//         "Raw input device access (possible keylogger)",
-//         Severity::High,
-//     ),
-//     ("/dev/tty", "TTY device access", Severity::Medium),
-//     ("/dev/pts/", "Pseudo-terminal access", Severity::Medium),
-//     ("/dev/hidraw", "Raw HID device access", Severity::High),
-//     (
-//         "/dev/uinput",
-//         "uinput device (can inject input events)",
-//         Severity::High,
-//     ),
-//     (
-//         "/dev/input/mice",
-//         "Mouse aggregator device",
-//         Severity::Medium,
-//     ),
-//     ("/dev/input/mouse", "Raw mouse device", Severity::Medium),
-//     (
-//         "/dev/input/event",
-//         "Raw keyboard/input event device",
-//         Severity::High,
-//     ),
-// ];
-//
-// const SUSPICIOUS_INPUT_FLAGS: &[(i32, &str)] = &[
-//     (
-//         libc::O_WRONLY,
-//         "Write access to input device (input injection)",
-//     ),
-//     (libc::O_RDWR, "Read-write access to input device"),
-// ];
+const INPUT_DEVICE_PATHS: &[(&str, Severity)] = &[
+    ("/dev/input/", Severity::High),
+    ("/dev/tty", Severity::Medium),
+    ("/dev/pts/", Severity::Medium),
+    ("/dev/hidraw", Severity::High),
+    ("/dev/uinput", Severity::High),
+    ("/dev/input/mice", Severity::Medium),
+    ("/dev/input/mouse", Severity::Medium),
+    ("/dev/input/event", Severity::High),
+];
+
+pub struct SuspiciousInputDeviceAccessRule;
+
+impl SuspiciousInputDeviceAccessRule {
+    fn check<T>(&self, event: &T, _: &RuleContext) -> Option<Severity>
+    where
+        T: HasFilePath,
+    {
+        INPUT_DEVICE_PATHS
+            .iter()
+            .filter_map(|(input, sev)| {
+                if event.file_path().starts_with(*input) {
+                    Some(*sev)
+                } else {
+                    None
+                }
+            })
+            .next()
+    }
+}
+
+impl Rule for SuspiciousInputDeviceAccessRule {
+    fn name(&self) -> &'static str {
+        "SuspiciousInputDeviceAccessRule"
+    }
+    match_event!(FileOpen, FileClose, FileRead, FileWrite);
+}
 
 pub struct RuleContext<'a> {
     pub process_cache: &'a HashMap<u32, ProcessInfo>,
@@ -593,7 +589,7 @@ impl FlagRule {
             "RDWR" => Some(Severity::Medium),
             "CREAT" => Some(Severity::Medium),
             "TRUNC" => Some(Severity::High),
-            _ => Some(Severity::Info),
+            _ => None,
         }
     }
 }
@@ -603,7 +599,7 @@ impl Rule for FlagRule {
         "SensitiveFlag"
     }
 
-    match_event!(FileOpen, FileClose);
+    match_event!(FileOpen, FileClose, FileRead, FileWrite, FileRename);
 }
 
 pub struct RootWriteRule;
@@ -643,7 +639,7 @@ impl TempExecutableRule {
         if proc.exe.starts_with("/tmp") || proc.exe.starts_with("/dev/shm") {
             Some(Severity::High)
         } else {
-            Some(Severity::Low)
+            None
         }
     }
 }
@@ -696,6 +692,7 @@ impl Classifier {
                         enabled: true,
                         paths: BTreeMap::new(),
                     }),
+                    Box::new(SuspiciousInputDeviceAccessRule),
                 ],
             },
             rules: None,
@@ -845,9 +842,11 @@ impl Rule for SuspiciousIpRule {
     fn check(&self, event: Event, ctx: &RuleContext) -> Option<Severity> {
         if let Some(file_bytes) = ctx.ipsum_bytes {
             match event {
-                //TODO:
                 Event::NetworkAccept(e) => self.check(e, file_bytes),
                 Event::NetworkConnect(e) => self.check(e, file_bytes),
+                Event::NetworkBind(e) => self.check(e, file_bytes),
+                Event::NetworkListen(e) => self.check(e, file_bytes),
+                Event::NetworkClose(e) => self.check(e, file_bytes),
                 _ => None,
             }
         } else {

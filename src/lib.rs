@@ -2,7 +2,6 @@ pub mod app;
 pub mod detection;
 pub mod gen_db;
 pub mod helper;
-pub mod parser;
 pub mod ui;
 pub mod write;
 
@@ -303,11 +302,11 @@ pub enum Severity {
 impl Severity {
     pub fn label(&self) -> &'static str {
         match self {
-            Severity::Info => "INFO",
+            Severity::Info => "INFO ",
             Severity::Low => "LOW ",
             Severity::Medium => "MED ",
-            Severity::High => "HIGH",
-            Severity::Critical => "CRIT",
+            Severity::High => "HIGH ",
+            Severity::Critical => "CRIT ",
         }
     }
 }
@@ -389,7 +388,6 @@ impl AppEvent {
         }
     }
 
-    //TODO
     pub fn matches_filter(&self, filter_idx: usize) -> bool {
         let val = FILTEREVENTS[filter_idx];
         match val {
@@ -400,10 +398,16 @@ impl AppEvent {
             "FileRead" => matches!(self, AppEvent::FileRead(_)),
             "FileWrite" => matches!(self, AppEvent::FileWrite(_)),
 
-            "NetworkAccept" => matches!(self, AppEvent::NetworkAccept(_)),
             "ProcessStart" => matches!(self, AppEvent::ProcessStart(_)),
             "ProcessExit" => matches!(self, AppEvent::ProcessExit(_)),
+            "ProcessFork" => matches!(self, AppEvent::ProcessFork(_)),
+
+            "NetworkAccept" => matches!(self, AppEvent::NetworkAccept(_)),
             "NetworkConnect" => matches!(self, AppEvent::NetworkConnect(_)),
+            "NetworkBind" => matches!(self, AppEvent::NetworkBind(_)),
+            "NetworkListen" => matches!(self, AppEvent::NetworkListen(_)),
+            "NetworkClose" => matches!(self, AppEvent::NetworkClose(_)),
+
             _ => false,
         }
     }
@@ -488,61 +492,54 @@ impl AppEvent {
         }
     }
 
-    //TODO
     pub fn detail(&self) -> String {
         match self {
             AppEvent::ProcessStart(e) => {
-                format!("exec {}", &e.event.filename)
+                format!("exec: {}", e.event.filename)
             }
             AppEvent::ProcessExit(e) => {
-                format!("pid {} exited", e.event.header.pid)
+                format!("exit: pid {}", e.event.header.pid)
             }
             AppEvent::ProcessFork(e) => {
-                format!(
-                    "parent pid {} child pid {}",
-                    e.event.parent.pid, e.event.child_pid
-                )
+                format!("fork: {} -> {}", e.event.parent.pid, e.event.child_pid)
             }
 
-            AppEvent::FileOpen(e) => e.event.file_path.clone(),
+            AppEvent::FileOpen(e) => {
+                format!("open: {}", e.event.file_path)
+            }
             AppEvent::FileClose(e) => {
-                format!("close {}", &e.event.header.comm)
+                format!("close: {}", e.event.header.comm)
             }
             AppEvent::FileDelete(e) => {
-                format!("delete {}", &e.event.filename)
+                format!("delete: {}", e.event.filename)
             }
             AppEvent::FileRead(e) => {
-                format!("read {}", &e.event.file_path)
+                format!("read: {}", e.event.file_path)
             }
             AppEvent::FileRename(e) => {
                 format!(
-                    "rename from {} to {}",
-                    &e.event.old_filename, &e.event.new_filename
+                    "rename: {} -> {}",
+                    e.event.old_filename, e.event.new_filename
                 )
             }
             AppEvent::FileWrite(e) => {
-                format!("write {}", &e.event.file_path)
+                format!("write: {}", e.event.file_path)
             }
 
             AppEvent::NetworkAccept(e) => {
-                let addr = e.event.endpoints.remote_ip.to_string();
-                format!("→  {addr}")
+                format!("accept: {}", e.event.endpoints.remote_ip)
             }
             AppEvent::NetworkConnect(e) => {
-                let addr = e.event.endpoints.remote_ip.to_string();
-                format!("→  {addr}")
+                format!("connect: {}", e.event.endpoints.remote_ip)
             }
             AppEvent::NetworkBind(e) => {
-                let addr = e.event.endpoints.remote_ip.to_string();
-                format!("→  {addr}")
+                format!("bind: {}", e.event.endpoints.remote_ip)
             }
             AppEvent::NetworkClose(e) => {
-                let addr = e.event.endpoints.remote_ip.to_string();
-                format!("→  {addr}")
+                format!("close: {}", e.event.endpoints.remote_ip)
             }
             AppEvent::NetworkListen(e) => {
-                let addr = e.event.endpoints.remote_ip.to_string();
-                format!("→  {addr}")
+                format!("listen: {}", e.event.endpoints.remote_ip)
             }
         }
     }

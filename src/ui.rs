@@ -5,7 +5,7 @@ use crate::*;
 use bpfx::EventHeader;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap};
 
@@ -55,9 +55,9 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(22), // sidebar
+            Constraint::Length(24), // sidebar
             Constraint::Min(40),    // stream
-            Constraint::Length(38), // more details part
+            Constraint::Length(55), // more details part
         ])
         .split(area);
 
@@ -254,31 +254,56 @@ pub const SEVERITY_FILTERS: &[(Severity, &str); 5] = &[
 ];
 
 fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
-    let outer = Block::default()
+    let block = Block::default()
+        .title(" sidebar ")
+        .title_style(Style::default().fg(C_TEXT))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(C_BORDER))
         .style(Style::default().bg(C_BG));
 
-    let inner = outer.inner(area);
-    frame.render_widget(outer, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    let [severity_area, filter_area] = Layout::vertical([
-        Constraint::Length((SEVERITY_FILTERS.len() + 3) as u16),
+    let [severity_area, sep_area, filter_area] = Layout::vertical([
+        Constraint::Length((SEVERITY_FILTERS.len() + 2) as u16),
+        Constraint::Length(1),
         Constraint::Min(0),
     ])
     .areas(inner);
 
-    let severity_block = Block::default().title(" Severity ");
+    app.sev_area = severity_area;
+    app.filter_area = filter_area;
 
-    let severity_inner = severity_block.inner(severity_area);
-    frame.render_widget(severity_block, severity_area);
+    let severity_header = Rect {
+        x: severity_area.x,
+        y: severity_area.y,
+        width: severity_area.width,
+        height: 1,
+    };
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            " Severity ",
+            Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD),
+        )),
+        severity_header,
+    );
+
+    let severity_rows = Rect {
+        x: severity_area.x,
+        y: severity_area.y + 1,
+        width: severity_area.width,
+        height: severity_area.height.saturating_sub(1),
+    };
 
     let rows = Layout::vertical(
         std::iter::repeat_n(Constraint::Length(1), SEVERITY_FILTERS.len()).collect::<Vec<_>>(),
     )
-    .split(severity_inner);
+    .split(severity_rows);
 
     let sev_colors = [C_RED, C_ORANGE, C_YELLOW, C_BLUE, C_BG3];
+
     let counts = [
         app.crit_ev_count,
         app.high_ev_count,
@@ -286,8 +311,6 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         app.low_ev_count,
         app.info_ev_count,
     ];
-
-    app.sev_area = severity_area;
 
     let count_width = counts
         .iter()
@@ -335,17 +358,42 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     }
 
-    let filter_block = Block::default().title(" Filter Events ");
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(sep_area.width as usize),
+            Style::default().fg(C_BORDER),
+        ))),
+        sep_area,
+    );
 
-    let filter_inner = filter_block.inner(filter_area);
-    frame.render_widget(filter_block, filter_area);
-    app.filter_area = filter_area;
+    let filter_header = Rect {
+        x: filter_area.x,
+        y: filter_area.y,
+        width: filter_area.width,
+        height: 1,
+    };
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            " Filter Events ",
+            Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD),
+        )),
+        filter_header,
+    );
+
+    let filter_list_area = Rect {
+        x: filter_area.x,
+        y: filter_area.y + 1,
+        width: filter_area.width,
+        height: filter_area.height.saturating_sub(1),
+    };
 
     let items: Vec<ListItem> = FILTEREVENTS
         .iter()
         .enumerate()
         .map(|(idx, event)| {
             let selected = app.selected_filters[idx];
+
             let marker = if selected { "▶" } else { "▸" };
 
             ListItem::new(Line::from(vec![
@@ -370,13 +418,18 @@ fn render_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    frame.render_widget(List::new(items), filter_inner);
+    frame.render_widget(
+        List::new(items).style(Style::default().bg(C_BG)),
+        filter_list_area,
+    );
 }
 
 fn render_detail_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
+        .title(" details ")
+        .title_style(Style::default().fg(C_TEXT))
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(C_BORDER))
         .style(Style::default().bg(C_BG));
 
@@ -384,13 +437,15 @@ fn render_detail_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
 
     let event = match app.selected_event() {
-        Some(s) => s,
+        Some(event) => event,
         None => {
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    "\n  no event selected",
+                Paragraph::new(Line::from(Span::styled(
+                    "no event selected",
                     Style::default().fg(C_MUTED),
-                )),
+                )))
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(C_BG)),
                 inner,
             );
             return;
@@ -398,6 +453,7 @@ fn render_detail_side_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let lines = build_detail_lines(event, app);
+
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -505,55 +561,72 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
     );
 
     lines.push(Line::from(vec![
+        Span::styled("●  ", Style::default().fg(sev_col)),
         Span::styled(
             sev.label().to_string(),
             Style::default().fg(sev_col).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ", Style::default()),
+        Span::styled("  │  ", Style::default().fg(C_BORDER)),
         Span::styled(
             event.event.kind_label().trim().to_string(),
             Style::default().fg(C_PURPLE),
         ),
     ]));
+
     lines.push(Line::from(Span::styled(
         timestamp,
         Style::default().fg(C_MUTED),
     )));
+
     lines.push(Line::from(""));
 
     match &event.event {
         AppEvent::ProcessStart(e) => {
             section(&mut lines, "ProcessStart");
-            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
+
             kv(
                 &mut lines,
-                "ppid ",
+                "pid      ",
+                &e.event.header.pid.to_string(),
+                C_TEXT,
+            );
+            kv(
+                &mut lines,
+                "ppid     ",
                 &e.event.header.ppid.to_string(),
                 C_TEXT,
             );
             kv(
                 &mut lines,
-                "uid",
+                "uid      ",
                 &uid_label(e.event.header.uid),
                 uid_color(e.event.header.uid),
             );
             kv(&mut lines, "filename ", &e.event.filename, C_PATH);
-            kv(&mut lines, "comm ", &e.event.header.comm, C_PATH);
+            kv(&mut lines, "comm     ", &e.event.header.comm, C_PATH);
         }
+
         AppEvent::ProcessExit(e) => {
             let ok = e.event.exit_code >= 0;
+
             section(&mut lines, "ProcessExit");
-            kv(&mut lines, "pid", &e.event.header.pid.to_string(), C_TEXT);
+
             kv(
                 &mut lines,
-                "ppid ",
+                "pid    ",
+                &e.event.header.pid.to_string(),
+                C_TEXT,
+            );
+            kv(
+                &mut lines,
+                "ppid   ",
                 &e.event.header.ppid.to_string(),
                 C_TEXT,
             );
-            kv(&mut lines, "comm ", &e.event.header.comm, C_PATH);
+            kv(&mut lines, "comm   ", &e.event.header.comm, C_PATH);
             kv(
                 &mut lines,
-                "retval",
+                "retval ",
                 &format!(
                     "{} ({})",
                     e.event.exit_code,
@@ -562,115 +635,149 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 if ok { C_TEXT } else { C_RED },
             );
         }
+
         AppEvent::ProcessFork(e) => {
-            section(&mut lines, "ProcessExit");
+            section(&mut lines, "ProcessFork");
+
             kv(
                 &mut lines,
-                "child pid",
+                "child pid   ",
                 &e.event.child_pid.to_string(),
                 C_TEXT,
             );
-            kv(&mut lines, "child comm ", &e.event.child_comm, C_PATH);
+            kv(&mut lines, "child comm  ", &e.event.child_comm, C_PATH);
             kv(
                 &mut lines,
-                "parent pid ",
+                "parent pid  ",
                 &e.event.parent.pid.to_string(),
                 C_TEXT,
             );
             kv(&mut lines, "parent comm ", &e.event.parent.comm, C_PATH);
             kv(
                 &mut lines,
-                "ppid ",
+                "ppid        ",
                 &e.event.parent.ppid.to_string(),
                 C_TEXT,
             );
         }
+
         AppEvent::FileOpen(e) => {
             section(&mut lines, "FileOpen");
-            kv(&mut lines, "name", &e.event.header.comm, C_TEXT);
-            kv(&mut lines, "pid", &e.event.header.pid.to_string(), C_TEXT);
+
+            kv(&mut lines, "name ", &e.event.header.comm, C_TEXT);
+            kv(&mut lines, "pid  ", &e.event.header.pid.to_string(), C_TEXT);
             kv(
                 &mut lines,
-                "ppid",
+                "ppid ",
                 &e.event.header.ppid.to_string(),
                 C_MUTED,
             );
             kv(
                 &mut lines,
-                "uid",
+                "uid  ",
                 &uid_label(e.event.header.uid),
                 uid_color(e.event.header.uid),
             );
-            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
+            kv(
+                &mut lines,
+                "gid  ",
+                &e.event.header.gid.to_string(),
+                C_MUTED,
+            );
 
             lines.push(Line::from(""));
+
             section(&mut lines, "FILE");
+
             let op = &e.event.file_type;
             let file_name = &e.event.file_name().to_string();
             let file_path = &e.event.file_path;
+
             let path_col = if crate::helper::is_sensitive_path(file_path) {
                 C_RED
             } else {
                 C_PATH
             };
+
             kv(&mut lines, "filepath ", file_path, path_col);
             kv(&mut lines, "filename ", file_name, C_TEXT);
-            kv(&mut lines, "op", &format!("{op:?}"), C_TEXT);
+            kv(&mut lines, "op       ", &format!("{op:?}"), C_TEXT);
             kv(
                 &mut lines,
-                "flags",
+                "flags    ",
                 &format!("{:#010x}", e.event.flags),
                 C_MUTED,
             );
             kv(
                 &mut lines,
-                "mode",
+                "mode     ",
                 &format!("{:?}", e.event.file_type),
                 C_MUTED,
             );
 
             let ok = e.event.retval >= 0;
+
             kv(
                 &mut lines,
-                "retval",
-                &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
+                "retval   ",
+                &format!(
+                    "{} ({})",
+                    e.event.retval,
+                    if ok { "ok " } else { "failed " }
+                ),
                 if ok { C_TEXT } else { C_RED },
             );
-            kv(&mut lines, "inode", &e.event.inode.to_string(), C_MUTED);
+
+            kv(&mut lines, "inode    ", &e.event.inode.to_string(), C_MUTED);
         }
+
         AppEvent::FileClose(e) => {
             section(&mut lines, "FileClose");
-            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
+
             kv(
                 &mut lines,
-                "ppid",
+                "pid      ",
+                &e.event.header.pid.to_string(),
+                C_TEXT,
+            );
+            kv(
+                &mut lines,
+                "ppid     ",
                 &e.event.header.ppid.to_string(),
                 C_MUTED,
             );
             kv(
                 &mut lines,
-                "uid",
+                "uid      ",
                 &uid_label(e.event.header.uid),
                 uid_color(e.event.header.uid),
             );
-            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
+            kv(
+                &mut lines,
+                "gid      ",
+                &e.event.header.gid.to_string(),
+                C_MUTED,
+            );
             kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
             kv(
                 &mut lines,
-                "flags",
+                "flags    ",
                 &format!("{:#010x}", e.event.flags),
                 C_MUTED,
             );
+
             let ok = e.event.retval >= 0;
+
             kv(
                 &mut lines,
-                "retval",
+                "retval   ",
                 &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
                 if ok { C_TEXT } else { C_RED },
             );
+
             kv(
                 &mut lines,
-                "mode",
+                "mode     ",
                 &format!("{:?}", e.event.file_type),
                 C_MUTED,
             );
@@ -678,37 +785,51 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
 
         AppEvent::FileWrite(e) => {
             section(&mut lines, "FileWrite");
-            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
+
             kv(
                 &mut lines,
-                "ppid",
+                "pid      ",
+                &e.event.header.pid.to_string(),
+                C_TEXT,
+            );
+            kv(
+                &mut lines,
+                "ppid     ",
                 &e.event.header.ppid.to_string(),
                 C_MUTED,
             );
             kv(
                 &mut lines,
-                "uid",
+                "uid      ",
                 &uid_label(e.event.header.uid),
                 uid_color(e.event.header.uid),
             );
-            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
+            kv(
+                &mut lines,
+                "gid      ",
+                &e.event.header.gid.to_string(),
+                C_MUTED,
+            );
             kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
             kv(
                 &mut lines,
-                "flags",
+                "flags    ",
                 &format!("{:#010x}", e.event.flags),
                 C_MUTED,
             );
+
             let ok = e.event.retval >= 0;
+
             kv(
                 &mut lines,
-                "retval",
+                "retval   ",
                 &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
                 if ok { C_TEXT } else { C_RED },
             );
+
             kv(
                 &mut lines,
-                "mode",
+                "mode     ",
                 &format!("{:?}", e.event.file_type),
                 C_MUTED,
             );
@@ -716,38 +837,52 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
 
         AppEvent::FileRename(e) => {
             section(&mut lines, "FileRename");
-            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
+
             kv(
                 &mut lines,
-                "ppid",
+                "pid           ",
+                &e.event.header.pid.to_string(),
+                C_TEXT,
+            );
+            kv(
+                &mut lines,
+                "ppid          ",
                 &e.event.header.ppid.to_string(),
                 C_MUTED,
             );
             kv(
                 &mut lines,
-                "uid",
+                "uid           ",
                 &uid_label(e.event.header.uid),
                 uid_color(e.event.header.uid),
             );
-            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
-            kv(&mut lines, "old_filename ", &e.event.old_filename, C_PATH);
-            kv(&mut lines, "new_filename ", &e.event.new_filename, C_PATH);
             kv(
                 &mut lines,
-                "flags",
+                "gid           ",
+                &e.event.header.gid.to_string(),
+                C_MUTED,
+            );
+            kv(&mut lines, "old_filename  ", &e.event.old_filename, C_PATH);
+            kv(&mut lines, "new_filename  ", &e.event.new_filename, C_PATH);
+            kv(
+                &mut lines,
+                "flags         ",
                 &format!("{:#010x}", e.event.flags),
                 C_MUTED,
             );
+
             let ok = e.event.retval >= 0;
+
             kv(
                 &mut lines,
-                "retval",
+                "retval        ",
                 &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
                 if ok { C_TEXT } else { C_RED },
             );
+
             kv(
                 &mut lines,
-                "mode",
+                "mode          ",
                 &format!("{:?}", e.event.file_type),
                 C_MUTED,
             );
@@ -755,69 +890,97 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
 
         AppEvent::FileRead(e) => {
             section(&mut lines, "FileRead");
-            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
+
             kv(
                 &mut lines,
-                "ppid",
+                "pid      ",
+                &e.event.header.pid.to_string(),
+                C_TEXT,
+            );
+            kv(
+                &mut lines,
+                "ppid     ",
                 &e.event.header.ppid.to_string(),
                 C_MUTED,
             );
             kv(
                 &mut lines,
-                "uid",
+                "uid      ",
                 &uid_label(e.event.header.uid),
                 uid_color(e.event.header.uid),
             );
-            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
+            kv(
+                &mut lines,
+                "gid      ",
+                &e.event.header.gid.to_string(),
+                C_MUTED,
+            );
             kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
             kv(
                 &mut lines,
-                "flags",
+                "flags    ",
                 &format!("{:#010x}", e.event.flags),
                 C_MUTED,
             );
+
             let ok = e.event.retval >= 0;
+
             kv(
                 &mut lines,
-                "retval",
+                "retval   ",
                 &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
                 if ok { C_TEXT } else { C_RED },
             );
+
             kv(
                 &mut lines,
-                "mode",
+                "mode     ",
                 &format!("{:?}", e.event.file_type),
                 C_MUTED,
             );
         }
 
         AppEvent::FileDelete(e) => {
-            section(&mut lines, "FileWrite");
-            kv(&mut lines, "pid ", &e.event.header.pid.to_string(), C_TEXT);
+            section(&mut lines, "FileDelete");
+
             kv(
                 &mut lines,
-                "ppid",
+                "pid      ",
+                &e.event.header.pid.to_string(),
+                C_TEXT,
+            );
+            kv(
+                &mut lines,
+                "ppid     ",
                 &e.event.header.ppid.to_string(),
                 C_MUTED,
             );
             kv(
                 &mut lines,
-                "uid",
+                "uid      ",
                 &uid_label(e.event.header.uid),
                 uid_color(e.event.header.uid),
             );
-            kv(&mut lines, "gid", &e.event.header.gid.to_string(), C_MUTED);
-            kv(&mut lines, "filename ", &e.event.filename, C_PATH);
-            let ok = e.event.retval >= 0;
             kv(
                 &mut lines,
-                "retval",
+                "gid      ",
+                &e.event.header.gid.to_string(),
+                C_MUTED,
+            );
+            kv(&mut lines, "filename ", &e.event.filename, C_PATH);
+
+            let ok = e.event.retval >= 0;
+
+            kv(
+                &mut lines,
+                "retval   ",
                 &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
                 if ok { C_TEXT } else { C_RED },
             );
+
             kv(
                 &mut lines,
-                "mode",
+                "mode     ",
                 &format!("{:?}", e.event.file_type),
                 C_MUTED,
             );
@@ -896,6 +1059,8 @@ fn key(s: &'static str) -> Span<'static> {
 fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let (mode, color) = if app.searching {
         ("SEARCHING", C_PURPLE)
+    } else if app.pause {
+        ("PAUSED", C_RED)
     } else {
         ("STREAM", C_BLUE)
     };
@@ -956,6 +1121,7 @@ fn render_config_notification(frame: &mut Frame, app: &App) {
 
     let paragraph = Paragraph::new(message)
         .block(Block::bordered())
+        .cyan()
         .alignment(Alignment::Center);
 
     frame.render_widget(paragraph, notification_area);
