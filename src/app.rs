@@ -97,6 +97,7 @@ pub struct App {
     pub selected_sevs: Vec<bool>,
     pub config_notification: Option<(ConfigState, Instant)>,
     pub stream_list_offset: u16,
+    pub follow_tail_dirty: bool,
 }
 
 #[derive(Debug)]
@@ -155,13 +156,13 @@ impl Default for App {
             selected_sevs: vec![false; SEVERITY_FILTERS.len()],
             config_notification: None,
             stream_list_offset: 0,
+            follow_tail_dirty: false,
         }
     }
 }
 
 pub async fn writer_thread(
     mut receiver: Receiver<UiEvent>,
-    sender: &Sender<UiEvent>,
     batch_tx: Sender<bool>,
     log_config: RuntimeLogConfig,
 ) -> color_eyre::Result<()> {
@@ -174,9 +175,6 @@ pub async fn writer_thread(
     let mut oldest_segment_id = 0;
 
     while let Some(event) = receiver.recv().await {
-        if let Err(err) = sender.try_send(event.clone()) {
-            tracing::debug!(?err, "dropping event: downstream channel full");
-        }
         batch.push(event);
 
         if batch.len() >= PER_BATCH_SIZE {
@@ -373,8 +371,7 @@ impl App {
                     let idx = self.events.len();
 
                     self.events.push(ev.clone());
-
-                    writer_tx.send(ev).await?;
+                    writer_tx.try_send(ev)?;
 
                     if self.search_query.is_empty()
                         || match_query(&self.events[idx], &self.search_query)
@@ -384,7 +381,22 @@ impl App {
                 }
 
                 ViewMode::History => {
-                    writer_tx.send(ev).await?;
+                    if self.follow_tail {
+                        let idx = self.events.len();
+
+                        //FIX: this could grow indefenitly
+                        self.events.push(ev.clone());
+                        writer_tx.try_send(ev)?;
+
+                        if self.search_query.is_empty()
+                            || match_query(&self.events[idx], &self.search_query)
+                        {
+                            self.filtered_events.push(idx);
+                            self.follow_tail_dirty = true;
+                        }
+                    } else {
+                        writer_tx.try_send(ev)?;
+                    }
                 }
             }
 
@@ -513,11 +525,22 @@ impl App {
             KeyCode::Char('G') => {
                 if !self.pause {
                     self.follow_tail = true;
-                }
+                    self.view_mode = ViewMode::History;
 
-                if let Some(last) = self.filtered_events.len().checked_sub(1) {
-                    self.stream_state.select(Some(last));
-                    self.get_selected();
+                    let total = self.filtered_events.len();
+                    let height = self.view_port.height as usize;
+
+                    if total > 0 && height > 0 {
+                        let last_global = total - 1;
+
+                        self.view_port.window_start = last_global.saturating_sub(height - 1);
+
+                        let local_selected = last_global - self.view_port.window_start;
+
+                        self.stream_state.select(Some(local_selected));
+
+                        self.get_selected();
+                    }
                 }
             }
 
@@ -563,7 +586,6 @@ impl App {
         sh_tx: &watch::Sender<bool>,
         writer_tx: &Sender<UiEvent>,
         mut batch_rx: Receiver<bool>,
-        mut live_mode_rx: Receiver<UiEvent>,
         config_reload_tx: watch::Sender<bool>,
         mut config_rx: Receiver<ConfigState>,
     ) -> color_eyre::Result<()> {
@@ -616,38 +638,36 @@ impl App {
                     self.total_batches = read_batch_info()?.len();
                 }
 
-                Some(event) = live_mode_rx.recv(), if self.follow_tail => {
-                    let idx = self.events.len();
-
-                    self.events.push(event);
-
-                    if self.search_query.is_empty()
-                        || match_query(&self.events[idx], &self.search_query)
-                    {
-                        self.filtered_events.push(idx);
-
-                        let last = self.filtered_events.len() - 1;
-
-                        self.stream_state.select(Some(last));
-
-                        self.view_port.window_start =
-                            last.saturating_sub(
-                                self.view_port.height.saturating_sub(1)
-                            );
-
-                        self.get_selected();
-                    }
-                }
 
                 Some(val) = config_rx.recv() => {
                     self.check_config_state(val);
                 }
 
-                _ = tick.tick() => {
-                    terminal.draw(|frame| {
-                        render(frame, &mut self);
-                    })?;
+            _ = tick.tick() => {
+                if self.follow_tail_dirty {
+                    let total = self.filtered_events.len();
+                    let height = self.view_port.height as usize;
+
+                    if total > 0 && height > 0 {
+                        let last = total - 1;
+
+                        self.view_port.window_start =
+                            last.saturating_sub(height - 1);
+
+                        self.stream_state.select(Some(
+                            last - self.view_port.window_start
+                        ));
+
+                        self.get_selected();
+                    }
+
+                    self.follow_tail_dirty = false;
                 }
+
+                terminal.draw(|frame| {
+                    render(frame, &mut self);
+                })?;
+            }
             }
         }
 
@@ -662,26 +682,63 @@ impl App {
 
         Ok(())
     }
+
     pub fn scroll_up(&mut self) {
+        let total = self.filtered_events.len();
+
+        if total == 0 {
+            return;
+        }
+
+        let height = self.view_port.height as usize;
+
+        if height == 0 {
+            return;
+        }
+
         let local = self.stream_state.selected().unwrap_or(0);
-        let global = self.view_port.window_start + local;
-        let next_global = global.saturating_sub(1);
+
+        if local > 0 {
+            self.stream_state.select(Some(local - 1));
+        } else if self.view_port.window_start > 0 {
+            self.view_port.window_start -= 1;
+            self.stream_state.select(Some(0));
+        } else {
+            return;
+        }
+
+        let global = self.view_port.window_start + self.stream_state.selected().unwrap_or(0);
 
         if self.view_mode == ViewMode::History
-            && let Err(e) = self.ensure_batches_loaded(next_global)
+            && let Err(e) = self.ensure_batches_loaded(global)
         {
             tracing::error!("failed to load batch: {e}");
             return;
         }
 
-        let next_local = next_global.saturating_sub(self.view_port.window_start);
-        self.stream_state.select(Some(next_local));
         self.get_selected();
     }
 
     pub fn scroll_down(&mut self) {
+        let total = self.filtered_events.len();
+
+        if total == 0 {
+            return;
+        }
+
+        let height = self.view_port.height as usize;
+
+        if height == 0 {
+            return;
+        }
+
         let local = self.stream_state.selected().unwrap_or(0);
         let global = self.view_port.window_start + local;
+
+        if global + 1 >= total {
+            return;
+        }
+
         let next_global = global + 1;
 
         if self.view_mode == ViewMode::History
@@ -691,20 +748,25 @@ impl App {
             return;
         }
 
-        let next_local = next_global
-            .saturating_sub(self.view_port.window_start)
-            .min(self.filtered_events.len().saturating_sub(1));
-        self.stream_state.select(Some(next_local));
+        if local + 1 < height {
+            self.stream_state.select(Some(local + 1));
+        } else {
+            self.view_port.window_start += 1;
+            self.stream_state.select(Some(height - 1));
+        }
+
         self.get_selected();
     }
 
     pub fn get_selected(&mut self) {
-        let Some(selected) = self.stream_state.selected() else {
+        let Some(local) = self.stream_state.selected() else {
             self.selected_event = None;
             return;
         };
 
-        if let Some(&idx) = self.filtered_events.get(selected) {
+        let global = self.view_port.window_start + local;
+
+        if let Some(&idx) = self.filtered_events.get(global) {
             self.selected_event = self.events.get(idx).cloned();
         } else {
             self.selected_event = None;
@@ -726,8 +788,12 @@ impl App {
     }
 
     pub fn selected_event(&self) -> Option<&UiEvent> {
+        let local = self.stream_state.selected()?;
+
+        let global = self.view_port.window_start + local;
+
         self.filtered_events
-            .get(self.stream_state.selected().unwrap_or(0))
+            .get(global)
             .and_then(|&idx| self.events.get(idx))
     }
 }

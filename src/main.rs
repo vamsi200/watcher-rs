@@ -141,6 +141,7 @@ async fn read_events<'a>(
     classifier.process_map = HashMap::new();
 
     regain_privs()?;
+
     loop {
         tokio::select! {
             _ = sh_rx.changed() => {
@@ -149,7 +150,7 @@ async fn read_events<'a>(
 
             _ = config_watcher_rx.changed() => {
                 tracing::info!("reloading config");
-                if let Ok(rule_config) = write_path_config() {
+                if let Ok(rule_config) = read_path_config() {
                     tracing::info!("got new config");
                     classifier.rules = Some(rule_config);
                     config_tx.send(ConfigState::ConfigReloaded).await?;
@@ -414,7 +415,6 @@ async fn start_ui(
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
     writer_tx: &tokio::sync::mpsc::Sender<UiEvent>,
     batch_ready_rx: tokio::sync::mpsc::Receiver<bool>,
-    live_mode_rx: tokio::sync::mpsc::Receiver<UiEvent>,
     config_watcher_tx: watch::Sender<bool>,
     config_rx: Receiver<ConfigState>,
 ) -> color_eyre::Result<()> {
@@ -433,7 +433,6 @@ async fn start_ui(
         shutdown_tx,
         writer_tx,
         batch_ready_rx,
-        live_mode_rx,
         config_watcher_tx,
         config_rx,
     )
@@ -511,15 +510,13 @@ async fn main() -> color_eyre::Result<()> {
         None => {}
     }
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<AppEvent>(50_000);
+    let (tx, rx) = tokio::sync::mpsc::channel::<AppEvent>(10_000);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let (writer_tx, writer_rx) = tokio::sync::mpsc::channel::<UiEvent>(50_000);
+    let (writer_tx, writer_rx) = tokio::sync::mpsc::channel::<UiEvent>(10_000);
 
     let (batch_ready_tx, batch_ready_rx) = tokio::sync::mpsc::channel::<bool>(100);
-
-    let (live_mode_tx, live_mode_rx) = tokio::sync::mpsc::channel::<UiEvent>(20_000);
 
     let (writer_ready_tx, writer_ready_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -549,9 +546,7 @@ async fn main() -> color_eyre::Result<()> {
             return;
         }
 
-        if let Err(e) =
-            writer_thread(writer_rx, &live_mode_tx, batch_ready_tx, runtime_log_config).await
-        {
+        if let Err(e) = writer_thread(writer_rx, batch_ready_tx, runtime_log_config).await {
             eprintln!("writer failed: {e}");
             return;
         }
@@ -574,7 +569,6 @@ async fn main() -> color_eyre::Result<()> {
         &shutdown_tx,
         &writer_tx,
         batch_ready_rx,
-        live_mode_rx,
         config_watcher_tx,
         config_rx,
     )

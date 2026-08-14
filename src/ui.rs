@@ -79,6 +79,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         " stream ".to_string()
     };
+
     let block = Block::default()
         .title(title)
         .title_style(Style::default().fg(C_TEXT))
@@ -86,6 +87,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(C_BORDER))
         .style(Style::default().bg(C_BG));
+
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -95,12 +97,14 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         width: inner.width,
         height: 1,
     };
+
     let sep_area = Rect {
         x: inner.x,
         y: inner.y + 1,
         width: inner.width,
         height: 1,
     };
+
     let list_area = Rect {
         x: inner.x,
         y: inner.y + 2,
@@ -110,6 +114,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
 
     app.stream_area = inner;
     app.stream_list_offset = list_area.y - inner.y;
+    app.view_port.height = list_area.height as usize;
 
     const DIV: &str = "│";
 
@@ -128,10 +133,12 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(format!(" {DIV} "), Style::default().fg(C_BORDER)),
         Span::styled("DETAIL", Style::default().fg(C_MUTED)),
     ]);
+
     frame.render_widget(
         Paragraph::new(header_line).style(Style::default().bg(C_BG)),
         header_area,
     );
+
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "─".repeat(inner.width as usize),
@@ -141,30 +148,61 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 
     let total = app.filtered_events.len();
+
     if total == 0 {
         return;
     }
 
     if app.view_mode == ViewMode::Live && app.events.len() >= PER_BATCH_SIZE {
         tracing::info!("MOVING to history mode, len - {}", app.events.len());
+
         app.view_mode = ViewMode::History;
         app.current_batch = 0;
         app.view_port.window_start = 0;
     }
 
-    let selected = app.stream_state.selected().unwrap_or(0);
-    let mut items: Vec<ListItem> = Vec::new();
+    let height = list_area.height as usize;
 
-    for (i, &ev_idx) in app.filtered_events.iter().enumerate() {
+    if height == 0 {
+        return;
+    }
+
+    let total = app.filtered_events.len();
+    let height = list_area.height as usize;
+
+    let start = if app.follow_tail {
+        total.saturating_sub(height)
+    } else {
+        app.view_port.window_start.min(total.saturating_sub(1))
+    };
+
+    let end = (start + height).min(total);
+
+    let local_selected = app
+        .stream_state
+        .selected()
+        .unwrap_or(0)
+        .min(end.saturating_sub(start).saturating_sub(1));
+
+    let global_selected = start + local_selected;
+
+    let mut items: Vec<ListItem> = Vec::with_capacity(end - start + 1);
+
+    for i in start..end {
+        let ev_idx = app.filtered_events[i];
         let event: &UiEvent = &app.events[ev_idx];
+
         let sev = &event.severity;
-        let is_sel = selected == i;
+        let is_sel = global_selected == i;
+
         let sev_col = sev_color(sev);
+
         let ts = format_timestamp_ns(
             event.event.timestamp(),
             app.twle_hr_format,
             app.wallclock_offset_ns,
         );
+
         let pid = event.event.pid();
         let kind = event.event.kind_label();
         let detail = event.event.detail();
@@ -176,7 +214,9 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             C_BG
         };
+
         let accent = if is_sel { "▌" } else { " " };
+
         let div_style = Style::default().fg(C_BORDER).bg(bg);
 
         let line = Line::from(vec![
@@ -206,13 +246,19 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(format!(" {DIV} "), div_style),
             Span::styled(detail, Style::default().fg(detail_color(event)).bg(bg)),
         ]);
+
         items.push(ListItem::new(line));
     }
+
     items.push(ListItem::new(Line::from("")));
 
+    app.stream_state.select(Some(local_selected));
+
     let list = List::new(items).style(Style::default().bg(C_BG));
+
     frame.render_stateful_widget(list, list_area, &mut app.stream_state);
-    render_scrollbar(frame, inner, selected, total);
+
+    render_scrollbar(frame, list_area, global_selected, total);
 }
 
 fn render_scrollbar(frame: &mut Frame, area: Rect, selected: usize, total: usize) {
@@ -720,11 +766,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
             kv(
                 &mut lines,
                 "retval   ",
-                &format!(
-                    "{} ({})",
-                    e.event.retval,
-                    if ok { "ok " } else { "failed " }
-                ),
+                &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed " }),
                 if ok { C_TEXT } else { C_RED },
             );
 
