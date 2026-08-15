@@ -116,15 +116,15 @@ pub fn read_batch_info() -> color_eyre::Result<Vec<BatchInfo>, color_eyre::eyre:
     Ok(info)
 }
 
-pub fn read_batch(batch: usize) -> color_eyre::Result<Vec<UiEvent>> {
-    tracing::info!("reading from disk..");
-    let batch_info = read_batch_info()?;
-    let segment_id = batch_info[batch].segment_id;
-    let path = segment_path(segment_id);
+pub fn read_batch(batch: usize, batch_info: &[BatchInfo]) -> color_eyre::Result<Vec<UiEvent>> {
+    tracing::info!("reading batch {}", batch);
 
+    let info = batch_info
+        .get(batch)
+        .ok_or_else(|| color_eyre::eyre::eyre!("batch {} does not exist", batch))?;
+
+    let path = segment_path(info.segment_id);
     let mut file = File::open(path)?;
-
-    let info = &batch_info[batch];
 
     file.seek(std::io::SeekFrom::Start(info.file_offset))?;
 
@@ -133,10 +133,13 @@ pub fn read_batch(batch: usize) -> color_eyre::Result<Vec<UiEvent>> {
 
     let len = u32::from_le_bytes(len) as usize;
 
-    let mut content = vec![0; len];
+    let mut content = vec![0u8; len];
     file.read_exact(&mut content)?;
+
     let output = rkyv::from_bytes::<Vec<UiEvent>, Error>(&content)?;
+
     tracing::info!("returned batch len: {}", output.len());
+
     Ok(output)
 }
 

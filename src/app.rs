@@ -12,10 +12,12 @@ use crate::write::segment_path;
 use crate::write::serialize_event_data;
 use crate::write::write_batch_info_to_disk;
 use crate::write::write_to_disk;
+use crossterm::event::DisableMouseCapture;
 use crossterm::event::MouseButton;
 use crossterm::event::MouseEvent;
 use crossterm::event::MouseEventKind;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::execute;
 use crossterm::terminal::LeaveAlternateScreen;
 use nix::time::ClockId;
 use nix::time::clock_gettime;
@@ -30,8 +32,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 
-use crossterm::event::DisableMouseCapture;
-use crossterm::execute;
+const LIVE_BUFFER_SIZE: usize = 10_000;
 
 #[derive(Debug, PartialEq)]
 pub enum ViewMode {
@@ -98,6 +99,7 @@ pub struct App {
     pub config_notification: Option<(ConfigState, Instant)>,
     pub stream_list_offset: u16,
     pub follow_tail_dirty: bool,
+    pub tail_events_since_reload: usize,
 }
 
 #[derive(Debug)]
@@ -121,7 +123,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             running: true,
-            events: Vec::with_capacity(1000),
+            events: Vec::with_capacity(PER_BATCH_SIZE),
             alert: None,
             crit_ev_count: 0,
             high_ev_count: 0,
@@ -129,7 +131,7 @@ impl Default for App {
             low_ev_count: 0,
             info_ev_count: 0,
             selected_event: None,
-            filtered_events: Vec::with_capacity(10),
+            filtered_events: Vec::with_capacity(PER_BATCH_SIZE),
             searching: false,
             search_query: String::new(),
             pause: false,
@@ -157,6 +159,7 @@ impl Default for App {
             config_notification: None,
             stream_list_offset: 0,
             follow_tail_dirty: false,
+            tail_events_since_reload: 0,
         }
     }
 }
@@ -278,7 +281,9 @@ impl App {
         }
 
         let last_batch = self.total_batches.saturating_sub(1);
+
         let batch = (global_selected / PER_BATCH_SIZE).min(last_batch);
+
         let (lo, hi) = self.loaded_range;
 
         if batch >= lo && batch <= hi {
@@ -288,7 +293,7 @@ impl App {
         let (new_lo, new_hi) = if batch < lo {
             (batch.saturating_sub(1), batch)
         } else {
-            (batch, (batch + 1).min(last_batch))
+            (batch, (batch + 2).min(last_batch))
         };
 
         self.load_batch_range(new_lo, new_hi)
@@ -310,11 +315,15 @@ impl App {
         self.events.clear();
         self.filtered_events.clear();
 
+        let batch_info = read_batch_info()?;
+
         for b in lo..=hi {
-            let batch_events = read_batch(b)?;
+            let batch_events = read_batch(b, &batch_info)?;
+
             for ev in batch_events {
                 let idx = self.events.len();
                 self.events.push(ev);
+
                 if self.search_query.is_empty()
                     || match_query(&self.events[idx], &self.search_query)
                 {
@@ -325,6 +334,7 @@ impl App {
 
         self.loaded_range = (lo, hi);
         self.view_port.window_start = lo * PER_BATCH_SIZE;
+
         Ok(())
     }
 
@@ -371,7 +381,9 @@ impl App {
                     let idx = self.events.len();
 
                     self.events.push(ev.clone());
-                    writer_tx.try_send(ev)?;
+                    if let Err(e) = writer_tx.try_send(ev) {
+                        tracing::info!("ERROR: {e}");
+                    }
 
                     if self.search_query.is_empty()
                         || match_query(&self.events[idx], &self.search_query)
@@ -384,18 +396,19 @@ impl App {
                     if self.follow_tail {
                         let idx = self.events.len();
 
-                        //FIX: this could grow indefenitly
                         self.events.push(ev.clone());
-                        writer_tx.try_send(ev)?;
 
+                        self.tail_events_since_reload += 1;
                         if self.search_query.is_empty()
                             || match_query(&self.events[idx], &self.search_query)
                         {
                             self.filtered_events.push(idx);
                             self.follow_tail_dirty = true;
                         }
-                    } else {
+
                         writer_tx.try_send(ev)?;
+                    } else {
+                        writer_tx.send(ev).await?;
                     }
                 }
             }
@@ -459,7 +472,9 @@ impl App {
             }
             MouseEventKind::ScrollDown => self.scroll_down(),
             MouseEventKind::ScrollUp => {
-                self.follow_tail = false;
+                if self.follow_tail {
+                    self.follow_tail = false;
+                }
                 self.scroll_up()
             }
             _ => {}
@@ -498,7 +513,9 @@ impl App {
             }
 
             KeyCode::Up | KeyCode::Char('k') => {
-                self.follow_tail = false;
+                if self.follow_tail {
+                    self.follow_tail = false;
+                }
                 self.scroll_up();
             }
             KeyCode::Down | KeyCode::Char('j') => self.scroll_down(),
@@ -636,8 +653,20 @@ impl App {
 
                 Some(_) = batch_rx.recv() => {
                     self.total_batches = read_batch_info()?.len();
-                }
 
+                    if self.follow_tail
+                        && self.tail_events_since_reload >= LIVE_BUFFER_SIZE
+                        && self.total_batches > 0
+                    {
+                        let last_batch = self.total_batches - 1;
+
+                        self.load_batch_range(last_batch, last_batch)?;
+
+                        self.tail_events_since_reload = 0;
+
+                        self.follow_tail_dirty = true;
+                    }
+                }
 
                 Some(val) = config_rx.recv() => {
                     self.check_config_state(val);
@@ -684,12 +713,6 @@ impl App {
     }
 
     pub fn scroll_up(&mut self) {
-        let total = self.filtered_events.len();
-
-        if total == 0 {
-            return;
-        }
-
         let height = self.view_port.height as usize;
 
         if height == 0 {
@@ -698,34 +721,41 @@ impl App {
 
         let local = self.stream_state.selected().unwrap_or(0);
 
-        if local > 0 {
-            self.stream_state.select(Some(local - 1));
-        } else if self.view_port.window_start > 0 {
-            self.view_port.window_start -= 1;
-            self.stream_state.select(Some(0));
+        let global = self.view_port.window_start + local;
+
+        if global == 0 {
+            return;
+        }
+
+        let next_global = global - 1;
+
+        if self.view_mode == ViewMode::History {
+            if let Err(e) = self.ensure_batches_loaded(next_global) {
+                tracing::error!("failed to load batch: {e}");
+                return;
+            }
+        }
+
+        let loaded_global_start = self.loaded_range.0 * PER_BATCH_SIZE;
+        let next_loaded_local = next_global.saturating_sub(loaded_global_start);
+        let current_loaded_local = self
+            .view_port
+            .window_start
+            .saturating_sub(loaded_global_start);
+
+        let new_window_local = if next_loaded_local < current_loaded_local {
+            next_loaded_local
         } else {
-            return;
-        }
+            current_loaded_local
+        };
 
-        let global = self.view_port.window_start + self.stream_state.selected().unwrap_or(0);
-
-        if self.view_mode == ViewMode::History
-            && let Err(e) = self.ensure_batches_loaded(global)
-        {
-            tracing::error!("failed to load batch: {e}");
-            return;
-        }
-
+        self.view_port.window_start = loaded_global_start + new_window_local;
+        let new_selected = next_loaded_local.saturating_sub(new_window_local);
+        self.stream_state.select(Some(new_selected));
         self.get_selected();
     }
 
     pub fn scroll_down(&mut self) {
-        let total = self.filtered_events.len();
-
-        if total == 0 {
-            return;
-        }
-
         let height = self.view_port.height as usize;
 
         if height == 0 {
@@ -733,28 +763,39 @@ impl App {
         }
 
         let local = self.stream_state.selected().unwrap_or(0);
+
         let global = self.view_port.window_start + local;
-
-        if global + 1 >= total {
-            return;
-        }
-
         let next_global = global + 1;
 
-        if self.view_mode == ViewMode::History
-            && let Err(e) = self.ensure_batches_loaded(next_global)
-        {
-            tracing::error!("failed to load batch: {e}");
+        if self.view_mode == ViewMode::History {
+            if let Err(e) = self.ensure_batches_loaded(next_global) {
+                tracing::error!("failed to load batch: {e}");
+                return;
+            }
+        }
+
+        let loaded_global_start = self.loaded_range.0 * PER_BATCH_SIZE;
+
+        let next_loaded_local = next_global.saturating_sub(loaded_global_start);
+
+        if next_loaded_local >= self.filtered_events.len() {
             return;
         }
 
-        if local + 1 < height {
-            self.stream_state.select(Some(local + 1));
-        } else {
-            self.view_port.window_start += 1;
-            self.stream_state.select(Some(height - 1));
-        }
+        let current_window_local = self
+            .view_port
+            .window_start
+            .saturating_sub(loaded_global_start);
 
+        let new_window_local = if next_loaded_local >= current_window_local + height {
+            next_loaded_local - height + 1
+        } else {
+            current_window_local
+        };
+
+        self.view_port.window_start = loaded_global_start + new_window_local;
+        let new_selected = next_loaded_local.saturating_sub(new_window_local);
+        self.stream_state.select(Some(new_selected));
         self.get_selected();
     }
 
@@ -765,8 +806,17 @@ impl App {
         };
 
         let global = self.view_port.window_start + local;
+        let loaded_global_start = self.loaded_range.0 * PER_BATCH_SIZE;
 
-        if let Some(&idx) = self.filtered_events.get(global) {
+        let loaded_local = match global.checked_sub(loaded_global_start) {
+            Some(v) => v,
+            None => {
+                self.selected_event = None;
+                return;
+            }
+        };
+
+        if let Some(&idx) = self.filtered_events.get(loaded_local) {
             self.selected_event = self.events.get(idx).cloned();
         } else {
             self.selected_event = None;
@@ -791,9 +841,12 @@ impl App {
         let local = self.stream_state.selected()?;
 
         let global = self.view_port.window_start + local;
+        let loaded_global_start = self.loaded_range.0 * PER_BATCH_SIZE;
+
+        let loaded_local = global.checked_sub(loaded_global_start)?;
 
         self.filtered_events
-            .get(global)
+            .get(loaded_local)
             .and_then(|&idx| self.events.get(idx))
     }
 }

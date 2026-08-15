@@ -158,7 +158,11 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
 
         app.view_mode = ViewMode::History;
         app.current_batch = 0;
+
+        app.loaded_range = (0, 0);
         app.view_port.window_start = 0;
+        app.stream_state.select(Some(0));
+        app.get_selected();
     }
 
     let height = list_area.height as usize;
@@ -170,10 +174,17 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     let total = app.filtered_events.len();
     let height = list_area.height as usize;
 
+    let loaded_global_start = app.loaded_range.0 * PER_BATCH_SIZE;
+
+    let local_window_start = app
+        .view_port
+        .window_start
+        .saturating_sub(loaded_global_start);
+
     let start = if app.follow_tail {
         total.saturating_sub(height)
     } else {
-        app.view_port.window_start.min(total.saturating_sub(1))
+        local_window_start.min(total.saturating_sub(1))
     };
 
     let end = (start + height).min(total);
@@ -184,7 +195,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(0)
         .min(end.saturating_sub(start).saturating_sub(1));
 
-    let global_selected = start + local_selected;
+    let selected_local_index = start + local_selected;
 
     let mut items: Vec<ListItem> = Vec::with_capacity(end - start + 1);
 
@@ -193,7 +204,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         let event: &UiEvent = &app.events[ev_idx];
 
         let sev = &event.severity;
-        let is_sel = global_selected == i;
+        let is_sel = selected_local_index == i;
 
         let sev_col = sev_color(sev);
 
@@ -258,7 +269,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
 
     frame.render_stateful_widget(list, list_area, &mut app.stream_state);
 
-    render_scrollbar(frame, list_area, global_selected, total);
+    render_scrollbar(frame, list_area, local_selected, total);
 }
 
 fn render_scrollbar(frame: &mut Frame, area: Rect, selected: usize, total: usize) {
