@@ -102,6 +102,8 @@ pub struct App {
     pub follow_tail_dirty: bool,
     pub tail_events_since_reload: usize,
     pub live_buffer: bool,
+    pub base_global: usize,
+    pub flushed_global: usize,
 }
 
 #[derive(Debug)]
@@ -163,6 +165,8 @@ impl Default for App {
             follow_tail_dirty: false,
             tail_events_since_reload: 0,
             live_buffer: false,
+            base_global: 0,
+            flushed_global: 0,
         }
     }
 }
@@ -298,6 +302,7 @@ impl App {
         } else {
             (batch, (batch + 1).min(last_batch))
         };
+        info!("loading batch: {new_lo} {new_hi}");
 
         self.load_batch_range(new_lo, new_hi)
     }
@@ -339,7 +344,7 @@ impl App {
         }
 
         self.loaded_range = (lo, hi);
-        self.view_port.window_start = lo * PER_BATCH_SIZE;
+        // self.view_port.window_start = lo * PER_BATCH_SIZE;
 
         Ok(())
     }
@@ -350,29 +355,31 @@ impl App {
         writer_tx: &Sender<UiEvent>,
     ) -> color_eyre::Result<()> {
         let has_filters = self.selected_filters.iter().any(|&x| x);
-
         let filter = !has_filters
             || self
                 .selected_filters
                 .iter()
                 .enumerate()
                 .any(|(idx, selected)| *selected && ev.matches_filter(idx));
-
         if !filter {
             return Ok(());
         }
 
         let ev = UiEvent::new(ev);
 
-        let has_sev_filters = self.selected_sevs.iter().any(|&x| x);
+        if self.follow_tail {
+            writer_tx.try_send(ev.clone()).ok();
+        } else {
+            writer_tx.send(ev.clone()).await?;
+        }
 
+        let has_sev_filters = self.selected_sevs.iter().any(|&x| x);
         let sev_filter = !has_sev_filters
             || self
                 .selected_sevs
                 .iter()
                 .enumerate()
                 .any(|(idx, sel)| *sel && ev.severity == SEVERITY_FILTERS[idx].0);
-
         if sev_filter {
             match ev.event.severity() {
                 Severity::Critical => self.crit_ev_count += 1,
@@ -381,55 +388,19 @@ impl App {
                 Severity::Low => self.low_ev_count += 1,
                 Severity::Info => self.info_ev_count += 1,
             }
+        }
 
-            match self.view_mode {
-                ViewMode::Live => {
-                    let idx = self.events.len();
-
-                    self.events.push(ev.clone());
-                    if let Err(e) = writer_tx.try_send(ev) {
-                        tracing::info!("ERROR: {e}");
-                    }
-
-                    if self.search_query.is_empty()
-                        || match_query(&self.events[idx], &self.search_query)
-                    {
-                        self.filtered_events.push(idx);
-                    }
-                }
-
-                ViewMode::History => {
-                    if self.follow_tail {
-                        self.live_buffer = true;
-                        let idx = self.events.len();
-
-                        self.events.push(ev.clone());
-
-                        self.tail_events_since_reload += 1;
-                        if self.search_query.is_empty()
-                            || match_query(&self.events[idx], &self.search_query)
-                        {
-                            self.filtered_events.push(idx);
-                            self.follow_tail_dirty = true;
-                        }
-
-                        writer_tx.try_send(ev)?;
-                    } else {
-                        writer_tx.send(ev).await?;
-                    }
-                }
+        let idx = self.events.len();
+        self.events.push(ev);
+        if self.search_query.is_empty() || match_query(&self.events[idx], &self.search_query) {
+            self.filtered_events.push(idx);
+            if self.follow_tail {
+                self.follow_tail_dirty = true;
             }
+        }
 
-            if self.filtered_events.is_empty() {
-                self.stream_state.select(Some(0));
-            } else {
-                self.stream_state.select(Some(
-                    self.stream_state
-                        .selected()
-                        .unwrap_or(0)
-                        .min(self.filtered_events.len() - 1),
-                ));
-            }
+        if self.follow_tail {
+            self.evict_flushed_prefix();
         }
 
         Ok(())
@@ -548,8 +519,6 @@ impl App {
             }
 
             KeyCode::Char('G') => {
-                self.view_mode = ViewMode::History;
-
                 if !self.pause {
                     self.follow_tail = true;
                 } else {
@@ -668,21 +637,15 @@ impl App {
                 }
 
                 Some(_) = batch_rx.recv() => {
-                        self.total_batches = read_batch_info()?.len();
+                    self.total_batches = read_batch_info()?.len();
 
-                        if self.follow_tail
-                            && self.tail_events_since_reload >= LIVE_BUFFER_SIZE
-                            && self.total_batches > 0
-                        {
-                            let last_batch = self.total_batches - 1;
-
-                            self.load_batch_range(last_batch, last_batch)?;
-
-                            self.tail_events_since_reload = 0;
-
-                            self.follow_tail_dirty = true;
-                        }
+                    if self.follow_tail {
+                        self.on_flush_confirmed(
+                            self.total_batches * PER_BATCH_SIZE,
+                            self.total_batches,
+                        );
                     }
+                }
 
                 Some(val) = config_rx.recv() => {
                     self.check_config_state(val);
@@ -731,7 +694,136 @@ impl App {
         Ok(())
     }
 
-    pub fn scroll_up(&mut self) {
+    pub fn on_flush_confirmed(&mut self, flushed_count: usize, total_batches: usize) {
+        info!("flushing..");
+        self.flushed_global = flushed_count;
+        self.total_batches = total_batches;
+        self.evict_flushed_prefix();
+    }
+
+    fn evict_flushed_prefix(&mut self) {
+        if self.events.len() <= LIVE_BUFFER_SIZE {
+            return;
+        }
+
+        let excess = self.events.len() - LIVE_BUFFER_SIZE;
+        let flushed_local = self.flushed_global.saturating_sub(self.base_global);
+        let evict = excess.min(flushed_local);
+        if evict == 0 {
+            return;
+        }
+
+        self.events.drain(0..evict);
+        self.base_global += evict;
+
+        self.filtered_events.retain_mut(|idx| {
+            if *idx < evict {
+                false
+            } else {
+                *idx -= evict;
+                true
+            }
+        });
+
+        if self.view_port.window_start < self.base_global {
+            self.view_port.window_start = self.base_global;
+            self.stream_state.select(Some(0));
+        }
+        info!(
+            "events size: {}, filtered_events size: {}",
+            self.events.len(),
+            self.filtered_events.len()
+        );
+    }
+
+    fn ensure_backward_loaded(&mut self, global_needed: usize) -> color_eyre::Result<()> {
+        if global_needed >= self.base_global || self.total_batches == 0 {
+            return Ok(());
+        }
+
+        let last_batch = self.total_batches.saturating_sub(1);
+        let batch = (global_needed / PER_BATCH_SIZE).min(last_batch);
+        if batch >= self.loaded_range.0 && self.base_global <= batch * PER_BATCH_SIZE {
+            return Ok(());
+        }
+
+        let batch_info = read_batch_info()?;
+        let mut batch_events = read_batch(batch, &batch_info)?;
+        let prepend_count = batch_events.len();
+
+        batch_events.append(&mut self.events);
+        self.events = batch_events;
+
+        for idx in self.filtered_events.iter_mut() {
+            *idx += prepend_count;
+        }
+        let mut new_filtered: Vec<usize> = (0..prepend_count)
+            .filter(|&i| {
+                self.search_query.is_empty() || match_query(&self.events[i], &self.search_query)
+            })
+            .collect();
+        new_filtered.extend(self.filtered_events.drain(..));
+        self.filtered_events = new_filtered;
+
+        self.base_global = batch * PER_BATCH_SIZE;
+        self.loaded_range.0 = self.loaded_range.0.min(batch);
+
+        Ok(())
+    }
+
+    fn ensure_forward_loaded(&mut self, global_needed: usize) -> color_eyre::Result<()> {
+        if self.total_batches == 0 {
+            return Ok(());
+        }
+
+        let last_batch = self.total_batches - 1;
+        let persisted_end = (last_batch + 1) * PER_BATCH_SIZE;
+
+        let loaded_end = self.base_global + self.events.len();
+
+        tracing::info!(
+            "forward: needed={global_needed}, loaded_end={loaded_end}, persisted_end={persisted_end}, \
+         base={}, events={}, batches={}",
+            self.base_global,
+            self.events.len(),
+            self.total_batches,
+        );
+
+        if global_needed < loaded_end {
+            return Ok(());
+        }
+
+        if global_needed >= persisted_end {
+            return Ok(());
+        }
+
+        let batch = global_needed / PER_BATCH_SIZE;
+
+        let batch_info = read_batch_info()?;
+        let mut batch_events = read_batch(batch, &batch_info)?;
+
+        let appended = batch_events.len();
+
+        let old_len = self.events.len();
+        self.events.append(&mut batch_events);
+
+        for idx in old_len..self.events.len() {
+            if self.search_query.is_empty() || match_query(&self.events[idx], &self.search_query) {
+                self.filtered_events.push(idx);
+            }
+        }
+
+        self.loaded_range.1 = batch;
+
+        info!(
+            "forward loaded batch: {batch}, appended: {appended}, events: {}",
+            self.events.len()
+        );
+
+        Ok(())
+    }
+
+    fn scroll_up_live(&mut self) {
         let height = self.view_port.height as usize;
         if height == 0 {
             return;
@@ -740,97 +832,171 @@ impl App {
         let local = self.stream_state.selected().unwrap_or(0);
         let global = self.view_port.window_start + local;
 
-        if self.live_buffer {
-            if local > 0 {
-                self.stream_state.select(Some(local - 1));
-            } else if self.view_port.window_start > 0 {
-                self.view_port.window_start -= 1;
-                self.stream_state.select(Some(0));
-            } else {
-                self.live_buffer = false;
-                self.scroll_up();
-                return;
-            }
-
-            self.get_selected();
+        if global == 0 {
             return;
         }
 
-        let next_global = global.saturating_sub(1);
+        let next_global = global - 1;
 
-        if self.view_mode == ViewMode::History {
-            if let Err(e) = self.ensure_batches_loaded(next_global) {
+        if next_global < self.base_global {
+            if let Err(e) = self.ensure_backward_loaded(next_global) {
                 tracing::error!("failed to load batch: {e}");
                 return;
             }
         }
 
-        let loaded_global_start = self.loaded_range.0 * PER_BATCH_SIZE;
-        let next_loaded_local = next_global.saturating_sub(loaded_global_start);
-        let current_loaded_local = self
-            .view_port
-            .window_start
-            .saturating_sub(loaded_global_start);
+        let next_local = next_global - self.base_global;
 
-        let new_window_local = if next_loaded_local < current_loaded_local {
-            next_loaded_local
-        } else {
-            current_loaded_local
-        };
+        let current_window_local = self.view_port.window_start.saturating_sub(self.base_global);
 
-        self.view_port.window_start = loaded_global_start + new_window_local;
+        let new_window_local = next_local.min(current_window_local);
 
-        let new_selected = next_loaded_local.saturating_sub(new_window_local);
+        self.view_port.window_start = self.base_global + new_window_local;
 
-        self.stream_state.select(Some(new_selected));
+        self.stream_state
+            .select(Some(next_local - new_window_local));
+
         self.get_selected();
     }
 
-    pub fn scroll_down(&mut self) {
+    fn scroll_down_live(&mut self) {
         let height = self.view_port.height as usize;
-
         if height == 0 {
             return;
         }
 
         let local = self.stream_state.selected().unwrap_or(0);
-        tracing::info!("local: {local}");
-
         let global = self.view_port.window_start + local;
-        tracing::info!("global: {global}");
-
         let next_global = global + 1;
 
-        if self.view_mode == ViewMode::History {
-            if let Err(e) = self.ensure_batches_loaded(next_global) {
-                tracing::error!("failed to load batch: {e}");
-                return;
-            }
-        }
-
-        let loaded_global_start = self.loaded_range.0 * PER_BATCH_SIZE;
-
-        let next_loaded_local = next_global.saturating_sub(loaded_global_start);
-
-        if next_loaded_local >= self.filtered_events.len() {
+        if let Err(e) = self.ensure_forward_loaded(next_global) {
+            tracing::error!("failed to load batch: {e}");
             return;
         }
 
-        let current_window_local = self
-            .view_port
-            .window_start
-            .saturating_sub(loaded_global_start);
+        let Some(next_local) = next_global.checked_sub(self.base_global) else {
+            return;
+        };
 
-        let new_window_local = if next_loaded_local >= current_window_local + height {
-            next_loaded_local - height + 1
+        if next_local >= self.filtered_events.len() {
+            return;
+        }
+
+        let current_window_local = self.view_port.window_start.saturating_sub(self.base_global);
+
+        let new_window_local = if next_local >= current_window_local + height {
+            next_local - height + 1
         } else {
             current_window_local
         };
 
-        self.view_port.window_start = loaded_global_start + new_window_local;
-        let new_selected = next_loaded_local.saturating_sub(new_window_local);
-        self.stream_state.select(Some(new_selected));
+        self.view_port.window_start = self.base_global + new_window_local;
+
+        self.stream_state
+            .select(Some(next_local - new_window_local));
+
         self.get_selected();
+    }
+
+    fn scroll_up_history(&mut self) {
+        let height = self.view_port.height as usize;
+        if height == 0 {
+            return;
+        }
+
+        let local = self.stream_state.selected().unwrap_or(0);
+        let global = self.view_port.window_start + local;
+
+        if global == 0 {
+            tracing::info!("global is zero");
+            return;
+        }
+
+        let next_global = global - 1;
+
+        let loaded_start = self.base_global;
+        let loaded_end = self.base_global + self.events.len();
+
+        if next_global < loaded_start || next_global >= loaded_end {
+            if let Err(e) = self.ensure_batches_loaded(next_global) {
+                tracing::error!("failed to load batch: {e}");
+                return;
+            }
+        }
+
+        let Some(next_local) = next_global.checked_sub(self.base_global) else {
+            return;
+        };
+
+        if next_local >= self.events.len() {
+            return;
+        }
+
+        let current_window_local = self.view_port.window_start.saturating_sub(self.base_global);
+
+        let new_window_local = next_local.min(current_window_local);
+
+        self.view_port.window_start = self.base_global + new_window_local;
+
+        self.stream_state
+            .select(Some(next_local - new_window_local));
+
+        self.get_selected();
+    }
+
+    fn scroll_down_history(&mut self) {
+        let height = self.view_port.height as usize;
+        if height == 0 {
+            return;
+        }
+
+        let local = self.stream_state.selected().unwrap_or(0);
+        let global = self.view_port.window_start + local;
+        let next_global = global + 1;
+
+        if let Err(e) = self.ensure_batches_loaded(next_global) {
+            tracing::error!("failed to load batch: {e}");
+            return;
+        }
+
+        let Some(next_local) = next_global.checked_sub(self.base_global) else {
+            return;
+        };
+
+        if next_local >= self.filtered_events.len() {
+            return;
+        }
+
+        let current_window_local = self.view_port.window_start.saturating_sub(self.base_global);
+
+        let new_window_local = if next_local >= current_window_local + height {
+            next_local - height + 1
+        } else {
+            current_window_local
+        };
+
+        self.view_port.window_start = self.base_global + new_window_local;
+
+        self.stream_state
+            .select(Some(next_local - new_window_local));
+
+        self.get_selected();
+    }
+
+    pub fn scroll_up(&mut self) {
+        if self.follow_tail {
+            self.scroll_up_live();
+        } else {
+            self.scroll_up_history();
+        }
+    }
+
+    pub fn scroll_down(&mut self) {
+        if self.follow_tail {
+            self.scroll_down_live();
+        } else {
+            self.scroll_down_history();
+        }
     }
 
     pub fn get_selected(&mut self) {
@@ -840,21 +1006,15 @@ impl App {
         };
 
         let global = self.view_port.window_start + local;
-        let loaded_global_start = self.loaded_range.0 * PER_BATCH_SIZE;
-
-        let loaded_local = match global.checked_sub(loaded_global_start) {
-            Some(v) => v,
-            None => {
-                self.selected_event = None;
-                return;
-            }
+        let Some(loaded_local) = global.checked_sub(self.base_global) else {
+            self.selected_event = None;
+            return;
         };
 
-        if let Some(&idx) = self.filtered_events.get(loaded_local) {
-            self.selected_event = self.events.get(idx).cloned();
-        } else {
-            self.selected_event = None;
-        }
+        self.selected_event = self
+            .filtered_events
+            .get(loaded_local)
+            .and_then(|&idx| self.events.get(idx).cloned());
     }
 
     pub fn search_push(&mut self, c: char) {
@@ -876,7 +1036,6 @@ impl App {
 
         let global = self.view_port.window_start + local;
         let loaded_global_start = self.loaded_range.0 * PER_BATCH_SIZE;
-
         let loaded_local = global.checked_sub(loaded_global_start)?;
 
         self.filtered_events

@@ -475,7 +475,7 @@ async fn start_collectors(
 
     read_events(tx, shutdown_rx, sources, config_watcher_rx, &config_tx).await?;
 
-    // drop(runtime);
+    drop(runtime);
 
     Ok(())
 }

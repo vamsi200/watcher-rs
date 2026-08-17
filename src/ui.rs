@@ -229,6 +229,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let line = Line::from(vec![
             Span::styled(accent, Style::default().fg(sev_col).bg(bg)),
+            // Span::styled(format!(" {} ", i), div_style),
             Span::styled(
                 format!(" {:<TIME_W$}", &ts[..11.min(ts.len())]),
                 Style::default().fg(C_MUTED).bg(bg),
@@ -1111,9 +1112,13 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         ("SEARCHING", C_PURPLE)
     } else if app.pause {
         ("PAUSED", C_RED)
+    } else if app.follow_tail {
+        ("STREAM • FOLLOWING", C_BLUE)
     } else {
         ("STREAM", C_BLUE)
     };
+
+    let muted = Style::default().fg(C_MUTED).bg(C_BG2);
 
     let spans = Line::from(vec![
         Span::styled(
@@ -1123,23 +1128,32 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
                 .bg(color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ", Style::default().bg(C_BG2)),
-        Span::styled("↑↓ nav  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        Span::styled("  ", muted),
+        Span::styled("↑↓ nav", muted),
+        Span::styled("   ", muted),
+        key("gg"),
+        Span::styled(" top", muted),
+        Span::styled("   ", muted),
+        key("G"),
+        Span::styled(" latest", muted),
+        Span::styled("   ", muted),
         key("p"),
-        Span::styled(
-            if app.pause { " resume  " } else { " pause  " },
-            Style::default().fg(C_MUTED).bg(C_BG2),
-        ),
+        Span::styled(if app.pause { " resume" } else { " pause" }, muted),
+        Span::styled("   ", muted),
         key("/ or f"),
-        Span::styled(" filter  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        Span::styled(" filter", muted),
+        Span::styled("   ", muted),
         key("t"),
-        Span::styled(" 12/24 format  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        Span::styled(" 12/24 format", muted),
+        Span::styled("   ", muted),
         key("Ctrl + l"),
-        Span::styled(" Clear  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        Span::styled(" Clear", muted),
+        Span::styled("   ", muted),
         key("r"),
-        Span::styled(" Reload Config  ", Style::default().fg(C_MUTED).bg(C_BG2)),
+        Span::styled(" Reload Config", muted),
+        Span::styled("   ", muted),
         key("q"),
-        Span::styled(" quit", Style::default().fg(C_MUTED).bg(C_BG2)),
+        Span::styled(" quit", muted),
     ]);
 
     frame.render_widget(
