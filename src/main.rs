@@ -1,6 +1,6 @@
 use bpfx::{
-    Bpfx, BpfxConfig, FileEvent, FileFilter, FileMask, NetworkEvent, NetworkFilter, NetworkMask,
-    ProcessEvent, ProcessFilter, ProcessMask,
+    Bpfx, BpfxConfig, FileEvent, FileFilter, NetworkEvent, NetworkFilter, ProcessEvent,
+    ProcessFilter,
 };
 use clap::Subcommand;
 use crossterm::event::EnableMouseCapture;
@@ -456,25 +456,10 @@ async fn start_collectors(
 
     let mut bpf = Bpfx::with_config(config)?;
 
-    let process_filter = ProcessFilter {
-        mask: ProcessMask::ALL,
-        ..Default::default()
-    };
-
-    let file_filter = FileFilter {
-        event_type: FileMask::ALL,
-        ..Default::default()
-    };
-
-    let network_filter = NetworkFilter {
-        event_mask: NetworkMask::ALL,
-        ..Default::default()
-    };
-
     let sources = EventSources {
-        process: bpf.subscribe(process_filter)?,
-        file: bpf.subscribe(file_filter)?,
-        network: bpf.subscribe(network_filter)?,
+        process: bpf.subscribe(ProcessFilter::ALL)?,
+        file: bpf.subscribe(FileFilter::ALL)?,
+        network: bpf.subscribe(NetworkFilter::ALL)?,
         state_path: STATE_PATH.as_ref(),
     };
 
@@ -490,7 +475,7 @@ async fn start_collectors(
 
     read_events(tx, shutdown_rx, sources, config_watcher_rx, &config_tx).await?;
 
-    drop(runtime);
+    // drop(runtime);
 
     Ok(())
 }

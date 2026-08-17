@@ -1,3 +1,4 @@
+#![allow(unused)]
 use crate::app::{App, ConfigState, FILTEREVENTS, UiEvent, ViewMode};
 use crate::helper::format_timestamp_ns;
 use crate::write::PER_BATCH_SIZE;
@@ -181,11 +182,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         .window_start
         .saturating_sub(loaded_global_start);
 
-    let start = if app.follow_tail {
-        total.saturating_sub(height)
-    } else {
-        local_window_start.min(total.saturating_sub(1))
-    };
+    let start = local_window_start.min(total.saturating_sub(1));
 
     let end = (start + height).min(total);
 

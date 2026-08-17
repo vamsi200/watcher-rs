@@ -31,6 +31,7 @@ use std::time::SystemTime;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
+use tracing::info;
 
 const LIVE_BUFFER_SIZE: usize = 10_000;
 
@@ -100,6 +101,7 @@ pub struct App {
     pub stream_list_offset: u16,
     pub follow_tail_dirty: bool,
     pub tail_events_since_reload: usize,
+    pub live_buffer: bool,
 }
 
 #[derive(Debug)]
@@ -160,6 +162,7 @@ impl Default for App {
             stream_list_offset: 0,
             follow_tail_dirty: false,
             tail_events_since_reload: 0,
+            live_buffer: false,
         }
     }
 }
@@ -293,7 +296,7 @@ impl App {
         let (new_lo, new_hi) = if batch < lo {
             (batch.saturating_sub(1), batch)
         } else {
-            (batch, (batch + 2).min(last_batch))
+            (batch, (batch + 1).min(last_batch))
         };
 
         self.load_batch_range(new_lo, new_hi)
@@ -316,6 +319,9 @@ impl App {
         self.filtered_events.clear();
 
         let batch_info = read_batch_info()?;
+
+        info!("batch: {:?}", batch_info);
+        info!("lo: {}, hi: {}", lo, hi);
 
         for b in lo..=hi {
             let batch_events = read_batch(b, &batch_info)?;
@@ -394,6 +400,7 @@ impl App {
 
                 ViewMode::History => {
                     if self.follow_tail {
+                        self.live_buffer = true;
                         let idx = self.events.len();
 
                         self.events.push(ev.clone());
@@ -511,11 +518,12 @@ impl App {
                     config_watcher.send(true)?;
                 }
             }
-
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.follow_tail {
                     self.follow_tail = false;
+                    self.follow_tail_dirty = false;
                 }
+
                 self.scroll_up();
             }
             KeyCode::Down | KeyCode::Char('j') => self.scroll_down(),
@@ -540,24 +548,32 @@ impl App {
             }
 
             KeyCode::Char('G') => {
+                self.view_mode = ViewMode::History;
+
                 if !self.pause {
                     self.follow_tail = true;
-                    self.view_mode = ViewMode::History;
+                } else {
+                    self.follow_tail = false;
+                }
 
-                    let total = self.filtered_events.len();
-                    let height = self.view_port.height as usize;
+                let total = self.filtered_events.len();
+                let height = self.view_port.height as usize;
 
-                    if total > 0 && height > 0 {
-                        let last_global = total - 1;
+                if total > 0 && height > 0 {
+                    let last_local = total - 1;
+                    let local_window_start = last_local.saturating_sub(height - 1);
 
-                        self.view_port.window_start = last_global.saturating_sub(height - 1);
-
-                        let local_selected = last_global - self.view_port.window_start;
-
-                        self.stream_state.select(Some(local_selected));
-
-                        self.get_selected();
+                    if self.live_buffer {
+                        self.view_port.window_start = local_window_start;
+                    } else {
+                        let loaded_global_start = self.loaded_range.0 * PER_BATCH_SIZE;
+                        self.view_port.window_start = loaded_global_start + local_window_start;
                     }
+
+                    let local_selected = last_local - local_window_start;
+
+                    self.stream_state.select(Some(local_selected));
+                    self.get_selected();
                 }
             }
 
@@ -652,51 +668,54 @@ impl App {
                 }
 
                 Some(_) = batch_rx.recv() => {
-                    self.total_batches = read_batch_info()?.len();
+                        self.total_batches = read_batch_info()?.len();
 
-                    if self.follow_tail
-                        && self.tail_events_since_reload >= LIVE_BUFFER_SIZE
-                        && self.total_batches > 0
-                    {
-                        let last_batch = self.total_batches - 1;
+                        if self.follow_tail
+                            && self.tail_events_since_reload >= LIVE_BUFFER_SIZE
+                            && self.total_batches > 0
+                        {
+                            let last_batch = self.total_batches - 1;
 
-                        self.load_batch_range(last_batch, last_batch)?;
+                            self.load_batch_range(last_batch, last_batch)?;
 
-                        self.tail_events_since_reload = 0;
+                            self.tail_events_since_reload = 0;
 
-                        self.follow_tail_dirty = true;
+                            self.follow_tail_dirty = true;
+                        }
                     }
-                }
 
                 Some(val) = config_rx.recv() => {
                     self.check_config_state(val);
                 }
 
-            _ = tick.tick() => {
-                if self.follow_tail_dirty {
-                    let total = self.filtered_events.len();
-                    let height = self.view_port.height as usize;
+                _ = tick.tick() => {
+                        if self.follow_tail_dirty {
+                        let total = self.filtered_events.len();
+                        let height = self.view_port.height as usize;
 
-                    if total > 0 && height > 0 {
-                        let last = total - 1;
+                        if total > 0 && height > 0 {
+                            let last = total - 1;
 
-                        self.view_port.window_start =
+                            let window_start =
                             last.saturating_sub(height - 1);
 
-                        self.stream_state.select(Some(
-                            last - self.view_port.window_start
-                        ));
+                            self.view_port.window_start = window_start;
 
-                        self.get_selected();
+                            self.stream_state.select(Some(
+                            last - window_start
+                            ));
+
+                            self.get_selected();
+                        }
+
+                        self.follow_tail_dirty = false;
                     }
-
-                    self.follow_tail_dirty = false;
-                }
 
                 terminal.draw(|frame| {
                     render(frame, &mut self);
                 })?;
-            }
+
+                }
             }
         }
 
@@ -714,20 +733,30 @@ impl App {
 
     pub fn scroll_up(&mut self) {
         let height = self.view_port.height as usize;
-
         if height == 0 {
             return;
         }
 
         let local = self.stream_state.selected().unwrap_or(0);
-
         let global = self.view_port.window_start + local;
 
-        if global == 0 {
+        if self.live_buffer {
+            if local > 0 {
+                self.stream_state.select(Some(local - 1));
+            } else if self.view_port.window_start > 0 {
+                self.view_port.window_start -= 1;
+                self.stream_state.select(Some(0));
+            } else {
+                self.live_buffer = false;
+                self.scroll_up();
+                return;
+            }
+
+            self.get_selected();
             return;
         }
 
-        let next_global = global - 1;
+        let next_global = global.saturating_sub(1);
 
         if self.view_mode == ViewMode::History {
             if let Err(e) = self.ensure_batches_loaded(next_global) {
@@ -750,7 +779,9 @@ impl App {
         };
 
         self.view_port.window_start = loaded_global_start + new_window_local;
+
         let new_selected = next_loaded_local.saturating_sub(new_window_local);
+
         self.stream_state.select(Some(new_selected));
         self.get_selected();
     }
@@ -763,8 +794,11 @@ impl App {
         }
 
         let local = self.stream_state.selected().unwrap_or(0);
+        tracing::info!("local: {local}");
 
         let global = self.view_port.window_start + local;
+        tracing::info!("global: {global}");
+
         let next_global = global + 1;
 
         if self.view_mode == ViewMode::History {
