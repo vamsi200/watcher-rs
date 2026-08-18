@@ -1,5 +1,7 @@
 use crate::AppEvent;
 use crate::Severity;
+use crate::gen_db::regain_privs;
+use crate::gen_db::update_ipsum_db;
 use crate::ui::*;
 use crate::write::BatchInfo;
 use crate::write::PER_BATCH_SIZE;
@@ -64,6 +66,13 @@ impl UiEvent {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub enum UpdateDbState {
+    Updating,
+    Updated,
+    UpdateFailed,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub running: bool,
@@ -104,6 +113,7 @@ pub struct App {
     pub live_buffer: bool,
     pub base_global: usize,
     pub flushed_global: usize,
+    pub db_update_state: Option<(UpdateDbState, Instant)>,
 }
 
 #[derive(Debug)]
@@ -167,6 +177,7 @@ impl Default for App {
             live_buffer: false,
             base_global: 0,
             flushed_global: 0,
+            db_update_state: None,
         }
     }
 }
@@ -311,6 +322,18 @@ impl App {
         self.config_notification = Some((state, Instant::now() + Duration::from_secs(3)));
     }
 
+    fn check_update_db_state(&mut self, state: UpdateDbState) {
+        self.db_update_state = Some((state, Instant::now() + Duration::from_secs(3)));
+    }
+
+    pub fn update_db_notification(&mut self) {
+        if let Some((_, expires_at)) = &self.db_update_state
+            && Instant::now() >= *expires_at
+        {
+            self.db_update_state = None;
+        }
+    }
+
     pub fn update_config_notification(&mut self) {
         if let Some((_, expires_at)) = &self.config_notification
             && Instant::now() >= *expires_at
@@ -344,7 +367,6 @@ impl App {
         }
 
         self.loaded_range = (lo, hi);
-        // self.view_port.window_start = lo * PER_BATCH_SIZE;
 
         Ok(())
     }
@@ -463,6 +485,7 @@ impl App {
         &mut self,
         key: KeyEvent,
         config_watcher: &watch::Sender<bool>,
+        db_tx: Sender<bool>,
     ) -> color_eyre::Result<()> {
         if self.searching {
             match key.code {
@@ -489,6 +512,16 @@ impl App {
                     config_watcher.send(true)?;
                 }
             }
+
+            KeyCode::Char('U') => {
+                self.check_update_db_state(UpdateDbState::Updating);
+
+                std::thread::spawn(move || {
+                    let result = update_ipsum_db().unwrap_or(false);
+                    let _ = db_tx.blocking_send(result).unwrap();
+                });
+            }
+
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.follow_tail {
                     self.follow_tail = false;
@@ -590,6 +623,8 @@ impl App {
         mut batch_rx: Receiver<bool>,
         config_reload_tx: watch::Sender<bool>,
         mut config_rx: Receiver<ConfigState>,
+        db_tx: Sender<bool>,
+        mut db_rx: Receiver<bool>,
     ) -> color_eyre::Result<()> {
         let realtime_ns = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
@@ -624,7 +659,7 @@ impl App {
             tokio::select! {
                 Some(event) = input_rx.recv() => {
                     match event {
-                        Event::Key(key) => self.handle_key(key, &config_reload_tx)?,
+                        Event::Key(key) => self.handle_key(key, &config_reload_tx, db_tx.clone())?,
                         Event::Mouse(mouse) => self.handle_mouse(mouse),
                         _ => {}
                     }
@@ -647,12 +682,21 @@ impl App {
                     }
                 }
 
+                Some(result) = db_rx.recv() => {
+                    if result {
+                        self.check_update_db_state(UpdateDbState::Updated);
+                    }else{
+                        self.check_update_db_state(UpdateDbState::UpdateFailed);
+                    }
+                    regain_privs()?;
+                }
+
                 Some(val) = config_rx.recv() => {
                     self.check_config_state(val);
                 }
 
                 _ = tick.tick() => {
-                        if self.follow_tail_dirty {
+                    if self.follow_tail_dirty {
                         let total = self.filtered_events.len();
                         let height = self.view_port.height as usize;
 
@@ -674,9 +718,9 @@ impl App {
                         self.follow_tail_dirty = false;
                     }
 
-                terminal.draw(|frame| {
-                    render(frame, &mut self);
-                })?;
+                    terminal.draw(|frame| {
+                        render(frame, &mut self);
+                    })?;
 
                 }
             }

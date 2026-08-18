@@ -126,7 +126,7 @@ pub fn parse_ipsum(path: Option<&PathBuf>, update: bool) -> color_eyre::Result<(
 }
 
 pub fn update_ipsum_db() -> color_eyre::Result<bool> {
-    println!("[INFO] updating ipsum db...");
+    tracing::info!("[INFO] updating ipsum db...");
 
     let Some(path) = STATE_PATH.as_ref() else {
         return Err(color_eyre::eyre::eyre!("Failed to get state dir"));
@@ -139,8 +139,9 @@ pub fn update_ipsum_db() -> color_eyre::Result<bool> {
     }
 
     let url = "https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt";
+    drop_privileges()?;
 
-    println!(
+    tracing::info!(
         "[INFO] Running command - `wget -O {} {}`",
         ipsum_file.display(),
         url
@@ -151,15 +152,15 @@ pub fn update_ipsum_db() -> color_eyre::Result<bool> {
         .status()?;
 
     if status.success() {
-        println!("[INFO] Parsing `ipsum.txt` and creating `ipsum.bin`");
+        tracing::info!("[INFO] Parsing `ipsum.txt` and creating `ipsum.bin`");
         parse_ipsum(Some(path), true)?;
-        println!("[DONE] created `ipsum.bin`");
+        tracing::info!("[DONE] created `ipsum.bin`");
         return Ok(true);
     } else {
-        println!("[ERROR] Failed to download ipsum.txt");
+        tracing::info!("[ERROR] Failed to download ipsum.txt");
     }
 
-    println!("[ERROR] Failed to download ipsum.txt");
+    tracing::info!("[ERROR] Failed to download ipsum.txt");
 
     Ok(false)
 }

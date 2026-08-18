@@ -2,7 +2,6 @@ use bpfx::{
     Bpfx, BpfxConfig, FileEvent, FileFilter, NetworkEvent, NetworkFilter, ProcessEvent,
     ProcessFilter,
 };
-use clap::Subcommand;
 use crossterm::event::EnableMouseCapture;
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
@@ -18,27 +17,13 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc::Sender, watch};
 use watcher_rs::app::{App, writer_thread};
 use watcher_rs::app::{ConfigState, UiEvent};
-use watcher_rs::gen_db::{drop_privileges, parse_ipsum, regain_privs, update_ipsum_db};
+use watcher_rs::gen_db::{drop_privileges, parse_ipsum, regain_privs};
 use watcher_rs::write::RuntimeLogConfig;
 use watcher_rs::*;
 
-use clap::Parser;
 use color_eyre::eyre::Result;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{self, Layer, layer::SubscriberExt, util::SubscriberInitExt};
-
-#[derive(Parser, Debug)]
-#[command(name = "watcher-rs", version, about)]
-struct Args {
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Update the ipsum database
-    UpdateDb,
-}
 
 struct EventSources<'a> {
     process: PollProcess,
@@ -417,6 +402,8 @@ async fn start_ui(
     batch_ready_rx: tokio::sync::mpsc::Receiver<bool>,
     config_watcher_tx: watch::Sender<bool>,
     config_rx: Receiver<ConfigState>,
+    db_tx: Sender<bool>,
+    db_rx: Receiver<bool>,
 ) -> color_eyre::Result<()> {
     let mut stdout = stdout();
 
@@ -435,6 +422,8 @@ async fn start_ui(
         batch_ready_rx,
         config_watcher_tx,
         config_rx,
+        db_tx,
+        db_rx,
     )
     .await?;
 
@@ -485,16 +474,6 @@ async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     initialize_logging()?;
 
-    let args = Args::parse();
-
-    match args.command {
-        Some(Command::UpdateDb) => {
-            update_ipsum_db()?;
-            return Ok(());
-        }
-        None => {}
-    }
-
     let (tx, rx) = tokio::sync::mpsc::channel::<AppEvent>(10_000);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -508,6 +487,8 @@ async fn main() -> color_eyre::Result<()> {
     let (config_watcher_tx, config_watcher_rx) = watch::channel::<bool>(false);
 
     let (config_tx, config_rx) = tokio::sync::mpsc::channel::<ConfigState>(100);
+
+    let (db_tx, db_rx) = tokio::sync::mpsc::channel::<bool>(1);
 
     tokio::spawn(async move {
         if let Err(e) = start_collectors(
@@ -556,6 +537,8 @@ async fn main() -> color_eyre::Result<()> {
         batch_ready_rx,
         config_watcher_tx,
         config_rx,
+        db_tx,
+        db_rx,
     )
     .await?;
 

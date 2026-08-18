@@ -1,5 +1,6 @@
 #![allow(unused)]
-use crate::app::{App, ConfigState, FILTEREVENTS, UiEvent, ViewMode};
+use crate::app::{App, ConfigState, FILTEREVENTS, UiEvent, UpdateDbState, ViewMode};
+use crate::gen_db::drop_privileges;
 use crate::helper::format_timestamp_ns;
 use crate::write::PER_BATCH_SIZE;
 use crate::*;
@@ -8,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 const C_BG: Color = Color::Rgb(13, 17, 23); // #0d1117
 const C_BG2: Color = Color::Rgb(22, 27, 34); // #161b22
@@ -36,6 +37,8 @@ fn sev_color(s: &Severity) -> Color {
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     app.update_config_notification();
+    app.update_db_notification();
+
     let area = frame.area();
     frame.render_widget(Block::default().style(Style::default().bg(C_BG2)), area);
     let chunks = Layout::default()
@@ -50,6 +53,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     render_main(frame, app, chunks[0]);
     render_config_notification(frame, app);
+    render_update_db_notification(frame, app);
 }
 
 fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -1147,10 +1151,13 @@ fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(" 12/24 format", muted),
         Span::styled("   ", muted),
         key("Ctrl + l"),
-        Span::styled(" Clear", muted),
+        Span::styled(" clear", muted),
         Span::styled("   ", muted),
         key("r"),
-        Span::styled(" Reload Config", muted),
+        Span::styled(" reload config", muted),
+        Span::styled("   ", muted),
+        key("U"),
+        Span::styled(" update DB", muted),
         Span::styled("   ", muted),
         key("q"),
         Span::styled(" quit", muted),
@@ -1170,6 +1177,56 @@ fn render_config_notification(frame: &mut Frame, app: &App) {
     let message = match state {
         ConfigState::ConfigReloaded => "✓  Configuration reloaded",
         ConfigState::ConfigReloadFailed => "✗  Configuration reload failed",
+    };
+
+    let area = frame.area();
+
+    let width = message.len() as u16 + 2;
+
+    let notification_area = Rect {
+        x: area.width.saturating_sub(width + 2),
+        y: area.height.saturating_sub(5),
+        width,
+        height: 3,
+    };
+
+    let paragraph = Paragraph::new(message)
+        .block(Block::bordered())
+        .cyan()
+        .alignment(Alignment::Center);
+
+    frame.render_widget(paragraph, notification_area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
+}
+
+fn render_update_db_notification(frame: &mut Frame, app: &App) {
+    let Some((state, _)) = &app.db_update_state else {
+        return;
+    };
+
+    let message = match state {
+        UpdateDbState::Updating => "↓  Updating IP reputation database...",
+        UpdateDbState::Updated => "✓  IP reputation database updated",
+        UpdateDbState::UpdateFailed => "✗  IP reputation database update failed",
     };
 
     let area = frame.area();
