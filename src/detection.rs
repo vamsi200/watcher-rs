@@ -1,3 +1,4 @@
+#![allow(unused)]
 use crate::Severity;
 use crate::gen_db::ArchivedIpsumDb;
 use crate::*;

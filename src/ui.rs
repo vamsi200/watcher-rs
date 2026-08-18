@@ -534,7 +534,7 @@ fn section(lines: &mut Vec<Line<'static>>, title: &'static str) {
 
 fn kv(lines: &mut Vec<Line<'static>>, key: &'static str, val: &str, color: Color) {
     lines.push(Line::from(vec![
-        Span::styled(format!("{:<8}", key), Style::default().fg(C_MUTED)),
+        Span::styled(format!("{}", key), Style::default().fg(C_MUTED)),
         Span::styled(val.to_string(), Style::default().fg(color)),
     ]));
 }
@@ -573,12 +573,12 @@ fn render_network(
 ) {
     section(lines, title);
 
-    kv(lines, "command", &header.comm, C_GREEN);
-    kv(lines, "pid", &header.pid.to_string(), C_TEXT);
-    kv(lines, "tid", &header.tid.to_string(), C_TEXT);
-    kv(lines, "ppid", &header.ppid.to_string(), C_TEXT);
-    kv(lines, "uid", &header.uid.to_string(), C_TEXT);
-    kv(lines, "gid", &header.gid.to_string(), C_TEXT);
+    kv(lines, "comm ", &header.comm, C_GREEN);
+    kv(lines, "pid ", &header.pid.to_string(), C_TEXT);
+    kv(lines, "tid ", &header.tid.to_string(), C_TEXT);
+    kv(lines, "ppid ", &header.ppid.to_string(), C_TEXT);
+    kv(lines, "uid ", &header.uid.to_string(), C_TEXT);
+    kv(lines, "gid ", &header.gid.to_string(), C_TEXT);
 
     lines.push(Line::from(""));
 

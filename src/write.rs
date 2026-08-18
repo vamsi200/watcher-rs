@@ -48,17 +48,11 @@ impl Default for BatchInfo {
 }
 
 pub fn log_path() -> color_eyre::Result<PathBuf> {
-    Ok(STATE_PATH
-        .as_ref()
-        .ok_or_else(|| color_eyre::eyre::eyre!("failed to find state path"))?
-        .join("events.bin.0"))
+    Ok(STATE_PATH.clone().join("events.bin.0"))
 }
 
 pub fn index_path() -> color_eyre::Result<PathBuf> {
-    Ok(STATE_PATH
-        .as_ref()
-        .ok_or_else(|| color_eyre::eyre::eyre!("failed to find state path"))?
-        .join("index.bin"))
+    Ok(STATE_PATH.clone().join("index.bin"))
 }
 
 pub fn prune_batch_info(segment_id: u64) -> color_eyre::Result<()> {
@@ -148,8 +142,7 @@ pub fn serialize_event_data(event: &Vec<UiEvent>) -> color_eyre::eyre::Result<Al
 }
 
 pub fn segment_path(id: u64) -> PathBuf {
-    let path = STATE_PATH.as_ref().unwrap().clone();
-    path.join(format!("events.bin.{id}"))
+    STATE_PATH.clone().join(format!("events.bin.{id}"))
 }
 
 pub fn write_to_disk(path: &PathBuf, bytes: AlignedVec) -> color_eyre::eyre::Result<u64> {

@@ -6,18 +6,19 @@ use crossterm::event::EnableMouseCapture;
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use detection::*;
+use directories::ProjectDirs;
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, restore};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions, exists};
 use std::io::stdout;
 use std::{path::PathBuf, sync::LazyLock};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc::Sender, watch};
 use watcher_rs::app::{App, writer_thread};
 use watcher_rs::app::{ConfigState, UiEvent};
-use watcher_rs::gen_db::{drop_privileges, parse_ipsum, regain_privs};
+use watcher_rs::gen_db::{drop_privileges, parse_ipsum, regain_privs, update_ipsum_db};
 use watcher_rs::write::RuntimeLogConfig;
 use watcher_rs::*;
 
@@ -30,6 +31,10 @@ struct EventSources<'a> {
     file: PollFile,
     network: PollNetwork,
     state_path: Option<&'a PathBuf>,
+}
+
+pub fn project_directory() -> Option<ProjectDirs> {
+    ProjectDirs::from("com", "", env!("CARGO_PKG_NAME"))
 }
 
 pub static PROJECT_NAME: LazyLock<String> =
@@ -443,22 +448,24 @@ async fn start_collectors(
         channel_capacity: 10000,
     };
 
+    regain_privs()?;
+
     let mut bpf = Bpfx::with_config(config)?;
 
-    let sources = EventSources {
-        process: bpf.subscribe(ProcessFilter::ALL)?,
-        file: bpf.subscribe(FileFilter::ALL)?,
-        network: bpf.subscribe(NetworkFilter::ALL)?,
-        state_path: STATE_PATH.as_ref(),
-    };
+    let process = bpf.subscribe(ProcessFilter::ALL)?;
+    let network = bpf.subscribe(NetworkFilter::ALL)?;
+    let file = bpf.subscribe(FileFilter::ALL)?;
 
-    drop_privileges()?;
+    let sources = EventSources {
+        process,
+        file,
+        network,
+        state_path: Some(&STATE_PATH),
+    };
 
     writer_ready_tx
         .send(())
         .map_err(|_| color_eyre::eyre::eyre!("failed to send ready status"))?;
-
-    init()?;
 
     let runtime = bpf.run();
 
@@ -469,11 +476,45 @@ async fn start_collectors(
     Ok(())
 }
 
+fn write_config() -> color_eyre::Result<()> {
+    drop_privileges()?;
+
+    let path = STATE_PATH.clone();
+    let ipsum_file = path.join("ipsum.txt");
+
+    if !exists(&ipsum_file)? {
+        update_ipsum_db()?;
+    }
+
+    let config_path = CONFIG_DIR_PATH.join("config.toml");
+
+    if !exists(&config_path)? {
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&config_path)?;
+    }
+
+    let rules_path = CONFIG_DIR_PATH.join("rules.toml");
+
+    if !exists(&rules_path)? {
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&rules_path)?;
+    }
+
+    init()?;
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
-    initialize_logging()?;
+    let _ = initialize_logging();
 
+    write_config()?;
     let (tx, rx) = tokio::sync::mpsc::channel::<AppEvent>(10_000);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -520,7 +561,7 @@ async fn main() -> color_eyre::Result<()> {
 
     tokio::spawn(async move {
         if let Err(e) = tokio::task::spawn_blocking(|| {
-            if parse_ipsum(STATE_PATH.as_ref(), false).is_err() {
+            if parse_ipsum(Some(&STATE_PATH), false).is_err() {
                 eprintln!("failed to parse ipsum db..")
             }
         })

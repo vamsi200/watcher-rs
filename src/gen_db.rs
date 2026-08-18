@@ -128,11 +128,8 @@ pub fn parse_ipsum(path: Option<&PathBuf>, update: bool) -> color_eyre::Result<(
 pub fn update_ipsum_db() -> color_eyre::Result<bool> {
     tracing::info!("[INFO] updating ipsum db...");
 
-    let Some(path) = STATE_PATH.as_ref() else {
-        return Err(color_eyre::eyre::eyre!("Failed to get state dir"));
-    };
-
-    let ipsum_file = path.join("ipsum.txt");
+    let path = STATE_PATH.clone();
+    let ipsum_file = path.clone().join("ipsum.txt");
 
     if ipsum_file.exists() {
         remove_file(&ipsum_file)?;
@@ -153,7 +150,7 @@ pub fn update_ipsum_db() -> color_eyre::Result<bool> {
 
     if status.success() {
         tracing::info!("[INFO] Parsing `ipsum.txt` and creating `ipsum.bin`");
-        parse_ipsum(Some(path), true)?;
+        parse_ipsum(Some(&path), true)?;
         tracing::info!("[DONE] created `ipsum.bin`");
         return Ok(true);
     } else {

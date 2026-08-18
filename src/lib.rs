@@ -6,8 +6,9 @@ pub mod ui;
 pub mod write;
 
 pub use bpfx::{file::*, network::*, process::*};
-use directories::ProjectDirs;
+use libc::{getpwuid, uid_t};
 use std::collections::BTreeMap;
+use std::ffi::CStr;
 use std::fs::{self, File, OpenOptions, create_dir, exists};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ use crate::detection::{
 };
 use crate::write::{LogConfig, index_path};
 
-pub static STATE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| match get_state_dir() {
+pub static STATE_PATH: LazyLock<PathBuf> = LazyLock::new(|| match get_state_dir() {
     Ok(path) => path,
     Err(e) => {
         eprintln!("failed to get state directory: {e}");
@@ -28,7 +29,7 @@ pub static STATE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| match get_st
     }
 });
 
-pub static CONFIG_DIR_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| match get_config_dir() {
+pub static CONFIG_DIR_PATH: LazyLock<PathBuf> = LazyLock::new(|| match get_config_dir() {
     Ok(path) => path,
     Err(e) => {
         eprintln!("failed to get config directory: {e}");
@@ -66,28 +67,19 @@ pub fn get_log_config() -> color_eyre::eyre::Result<LogConfig> {
     Ok(log_config)
 }
 
-pub fn open_config_file() -> color_eyre::eyre::Result<File> {
-    let config_path = CONFIG_DIR_PATH
-        .as_ref()
-        .ok_or_else(|| color_eyre::eyre::eyre!("Failed to get config directory"))?;
+pub fn open_config_file() -> color_eyre::Result<File> {
+    let config_path = CONFIG_DIR_PATH.join("config.toml");
 
     Ok(OpenOptions::new()
-        .create(true)
         .read(true)
         .write(true)
-        .open(config_path.join("config.toml"))?)
+        .open(config_path)?)
 }
 
-pub fn open_rules_file() -> color_eyre::eyre::Result<File> {
-    let config_path = CONFIG_DIR_PATH
-        .as_ref()
-        .ok_or_else(|| color_eyre::eyre::eyre!("Failed to get config directory"))?;
+pub fn open_rules_file() -> color_eyre::Result<File> {
+    let rules_path = CONFIG_DIR_PATH.join("rules.toml");
 
-    Ok(OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(config_path.join("rules.toml"))?)
+    Ok(OpenOptions::new().read(true).write(true).open(rules_path)?)
 }
 
 pub static RULE_CONFIG: LazyLock<Rules> = LazyLock::new(|| match write_path_config() {
@@ -99,9 +91,7 @@ pub static RULE_CONFIG: LazyLock<Rules> = LazyLock::new(|| match write_path_conf
 });
 
 pub fn read_path_config() -> color_eyre::eyre::Result<Rules> {
-    let config_path = CONFIG_DIR_PATH
-        .as_ref()
-        .ok_or_else(|| color_eyre::eyre::eyre!("Failed to get config directory"))?;
+    let config_path = CONFIG_DIR_PATH.clone();
 
     let mut file = OpenOptions::new()
         .read(true)
@@ -185,34 +175,48 @@ pub fn write_path_config() -> color_eyre::eyre::Result<Rules> {
     Ok(rule_config)
 }
 
-fn get_config_dir() -> color_eyre::eyre::Result<Option<PathBuf>> {
-    let mut config_dir_path: Option<PathBuf> = None;
-    if let Some(prj_dir) = project_directory() {
-        let config_dir = prj_dir.config_dir();
-        if !exists(config_dir)? {
-            create_dir(config_dir)?;
-        }
-        config_dir_path = Some(config_dir.to_path_buf());
+fn get_config_dir() -> color_eyre::eyre::Result<PathBuf> {
+    let home = user_home_dir()?;
+
+    let config_dir = home.join(".config").join(env!("CARGO_PKG_NAME"));
+    if !exists(&config_dir)? {
+        create_dir(&config_dir)?;
     }
+
+    let config_dir_path = config_dir.to_path_buf();
+
     Ok(config_dir_path)
 }
 
-pub fn project_directory() -> Option<ProjectDirs> {
-    ProjectDirs::from("com", "", env!("CARGO_PKG_NAME"))
-}
+fn user_home_dir() -> color_eyre::Result<PathBuf> {
+    let uid: uid_t = std::env::var("SUDO_UID")
+        .ok()
+        .and_then(|uid| uid.parse().ok())
+        .unwrap_or_else(|| unsafe { libc::getuid() });
 
-pub fn get_state_dir() -> color_eyre::eyre::Result<Option<PathBuf>> {
-    let mut state_dir_path: Option<PathBuf> = None;
-    if let Some(prj_dir) = project_directory()
-        && let Some(state_dir) = prj_dir.state_dir()
-    {
-        if !exists(state_dir)? {
-            create_dir(state_dir)?;
-        }
-        state_dir_path = Some(state_dir.to_path_buf())
+    let passwd = unsafe { getpwuid(uid) };
+
+    if passwd.is_null() {
+        return Err(color_eyre::eyre::eyre!(
+            "Failed to resolve home directory for UID {uid}"
+        ));
     }
 
-    Ok(state_dir_path)
+    let home = unsafe { CStr::from_ptr((*passwd).pw_dir) };
+
+    Ok(PathBuf::from(home.to_str()?))
+}
+
+pub fn get_state_dir() -> color_eyre::eyre::Result<PathBuf> {
+    let home = user_home_dir()?;
+
+    let state_dir = home.join(".local/state").join(env!("CARGO_PKG_NAME"));
+
+    if !exists(&state_dir)? {
+        create_dir(&state_dir)?;
+    }
+
+    Ok(state_dir)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -237,11 +241,10 @@ pub fn write_init_config(config: &LogConfig, file: &mut File) -> color_eyre::eyr
 
     Ok(())
 }
+
 pub fn init() -> color_eyre::eyre::Result<()> {
     tracing::info!("truncating log and index file");
-    let state_path = STATE_PATH
-        .as_ref()
-        .ok_or_else(|| color_eyre::eyre::eyre!("failed to find state path"))?;
+    let state_path = STATE_PATH.clone();
 
     for entry in fs::read_dir(state_path)? {
         let entry = entry?;
