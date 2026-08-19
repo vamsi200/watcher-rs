@@ -158,18 +158,6 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    if app.view_mode == ViewMode::Live && app.events.len() >= PER_BATCH_SIZE {
-        tracing::info!("MOVING to history mode, len - {}", app.events.len());
-
-        app.view_mode = ViewMode::History;
-        app.current_batch = 0;
-
-        app.loaded_range = (0, 0);
-        app.view_port.window_start = 0;
-        app.stream_state.select(Some(0));
-        app.get_selected();
-    }
-
     let height = list_area.height as usize;
 
     if height == 0 {
@@ -179,14 +167,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     let total = app.filtered_events.len();
     let height = list_area.height as usize;
 
-    let loaded_global_start = app.loaded_range.0 * PER_BATCH_SIZE;
-
-    let local_window_start = app
-        .view_port
-        .window_start
-        .saturating_sub(loaded_global_start);
-
-    let start = local_window_start.min(total.saturating_sub(1));
+    let start = app.view_port.window_start.min(total.saturating_sub(1));
 
     let end = (start + height).min(total);
 

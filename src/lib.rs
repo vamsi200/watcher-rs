@@ -42,12 +42,12 @@ pub fn get_log_config() -> color_eyre::eyre::Result<LogConfig> {
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
 
-    tracing::info!("writing to config.");
+    tracing::info!("loading config.");
     let log_config = match toml::from_str::<Config>(&buf) {
         Ok(config) => config.log_config,
         Err(_) => {
             let config = Config::default();
-            write_init_config(&config.log_config, &mut file)?;
+            write_init_config(&config, &mut file)?;
             config.log_config
         }
     };
@@ -235,7 +235,7 @@ impl Default for Config {
     }
 }
 
-pub fn write_init_config(config: &LogConfig, file: &mut File) -> color_eyre::eyre::Result<()> {
+pub fn write_init_config(config: &Config, file: &mut File) -> color_eyre::eyre::Result<()> {
     let toml = toml::to_string_pretty(&config)?;
     file.write_all(toml.as_bytes())?;
 
