@@ -62,7 +62,7 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([
             Constraint::Length(24), // sidebar
             Constraint::Min(40),    // stream
-            Constraint::Length(55), // more details part
+            Constraint::Length(45), // more details part
         ])
         .split(area);
 
@@ -252,7 +252,7 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
 
     frame.render_stateful_widget(list, list_area, &mut app.stream_state);
 
-    render_scrollbar(frame, list_area, local_selected, total);
+    render_scrollbar(frame, list_area, selected_local_index, total);
 }
 
 fn render_scrollbar(frame: &mut Frame, area: Rect, selected: usize, total: usize) {
@@ -742,12 +742,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
             kv(&mut lines, "filepath ", file_path, path_col);
             kv(&mut lines, "filename ", file_name, C_TEXT);
             kv(&mut lines, "op       ", &format!("{op:?}"), C_TEXT);
-            kv(
-                &mut lines,
-                "flags    ",
-                &format!("{:#010x}", e.event.flags),
-                C_MUTED,
-            );
+            kv(&mut lines, "flags    ", &e.event.flags(), C_MUTED);
             kv(
                 &mut lines,
                 "mode     ",
@@ -795,12 +790,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 C_MUTED,
             );
             kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
-            kv(
-                &mut lines,
-                "flags    ",
-                &format!("{:#010x}", e.event.flags),
-                C_MUTED,
-            );
+            kv(&mut lines, "flags    ", &e.event.flags(), C_MUTED);
 
             let ok = e.event.retval >= 0;
 
@@ -847,12 +837,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 C_MUTED,
             );
             kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
-            kv(
-                &mut lines,
-                "flags    ",
-                &format!("{:#010x}", e.event.flags),
-                C_MUTED,
-            );
+            kv(&mut lines, "flags    ", &e.event.flags(), C_MUTED);
 
             let ok = e.event.retval >= 0;
 
@@ -900,12 +885,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
             );
             kv(&mut lines, "old_filename  ", &e.event.old_filename, C_PATH);
             kv(&mut lines, "new_filename  ", &e.event.new_filename, C_PATH);
-            kv(
-                &mut lines,
-                "flags         ",
-                &format!("{:#010x}", e.event.flags),
-                C_MUTED,
-            );
+            kv(&mut lines, "flags    ", &e.event.flags(), C_MUTED);
 
             let ok = e.event.retval >= 0;
 
@@ -952,12 +932,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 C_MUTED,
             );
             kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
-            kv(
-                &mut lines,
-                "flags    ",
-                &format!("{:#010x}", e.event.flags),
-                C_MUTED,
-            );
+            kv(&mut lines, "flags    ", &e.event.flags(), C_MUTED);
 
             let ok = e.event.retval >= 0;
 
