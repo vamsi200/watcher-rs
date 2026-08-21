@@ -243,15 +243,14 @@ impl FileEventFilter {
             return true;
         }
 
-        let now = Instant::now();
         match self.filter.get_mut(&file_key) {
             Some(val) => {
                 if val.last_seen.elapsed() < Duration::from_secs(1) {
                     val.count += 1;
-                    val.last_seen = now;
                     return true;
                 }
-                val.last_seen = now;
+
+                val.last_seen = Instant::now();
                 val.count += 1;
                 false
             }
@@ -260,10 +259,11 @@ impl FileEventFilter {
                 self.filter.put(
                     file_key,
                     Aggregate {
-                        last_seen: now,
+                        last_seen: Instant::now(),
                         count: 1,
                     },
                 );
+
                 false
             }
         }
@@ -281,6 +281,7 @@ pub struct FileKey {
     pub pid: u32,
     pub tid: u32,
     pub key: KeyVal,
+    pub event_type: FileEventKey,
 }
 
 pub struct Aggregate {

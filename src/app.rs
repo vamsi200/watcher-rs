@@ -318,9 +318,6 @@ impl App {
     }
 
     fn load_batch_range(&mut self, lo: usize, hi: usize) -> color_eyre::Result<()> {
-        self.events.clear();
-        self.filtered_events.clear();
-
         let batch_info = read_batch_info()?;
 
         let mut loaded_hi = lo;

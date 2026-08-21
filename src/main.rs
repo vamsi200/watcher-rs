@@ -228,15 +228,18 @@ async fn read_events<'a>(
 
                 }
 
-
                 if let Some(inode) = event.inode(){
                     let filter_key = FileKey {
                         pid: event.process().pid,
                         tid: event.process().tid,
                         key: KeyVal::Inode(inode),
+                        event_type: event.dedup_key()
                     };
 
                     if file_event_filter.should_drop(&event, filter_key) {
+                        if event.file_path() == Some("/etc/passwd") {
+                            tracing::info!("dropping: {event:?}");
+                        }
                         continue;
                     }
 
@@ -246,9 +249,13 @@ async fn read_events<'a>(
                             pid: event.process().pid,
                             tid: event.process().tid,
                             key: KeyVal::Path(path.to_owned()),
+                            event_type: event.dedup_key()
                         };
 
                         if file_event_filter.should_drop(&event, filter_key) {
+                        if event.file_path() == Some("/etc/passwd") {
+
+                        tracing::info!("dropping: {event:?}");}
                                 continue;
                         }
                     }
@@ -259,7 +266,6 @@ async fn read_events<'a>(
                     exe: read_exe(event.header().pid),
                     comm: event.header().comm.clone()
                 });
-
 
                 match event {
                     FileEvent::Open(e) => {
@@ -280,6 +286,8 @@ async fn read_events<'a>(
                     }
 
                     FileEvent::Read(e) => {
+                        // tracing::info!("event: {e:?}");
+
                         let event = classifier.classify_read(e);
 
                         if tx.send(AppEvent::FileRead(event)).await.is_err() {
@@ -452,14 +460,10 @@ async fn start_collectors(
 
     let mut bpf = Bpfx::with_config(config)?;
 
-    let process = bpf.subscribe(ProcessFilter::ALL)?;
-    let network = bpf.subscribe(NetworkFilter::ALL)?;
-    let file = bpf.subscribe(FileFilter::ALL)?;
-
     let sources = EventSources {
-        process,
-        file,
-        network,
+        process: bpf.subscribe(ProcessFilter::ALL)?,
+        file: bpf.subscribe(FileFilter::ALL)?,
+        network: bpf.subscribe(NetworkFilter::ALL)?,
         state_path: Some(&STATE_PATH),
     };
 

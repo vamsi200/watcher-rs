@@ -653,20 +653,26 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
 
             kv(
                 &mut lines,
-                "pid    ",
+                "pid      ",
                 &e.event.header.pid.to_string(),
                 C_TEXT,
             );
             kv(
                 &mut lines,
-                "ppid   ",
+                "ppid     ",
                 &e.event.header.ppid.to_string(),
                 C_TEXT,
             );
-            kv(&mut lines, "comm   ", &e.event.header.comm, C_PATH);
             kv(
                 &mut lines,
-                "retval ",
+                "uid      ",
+                &uid_label(e.event.header.uid),
+                uid_color(e.event.header.uid),
+            );
+            kv(&mut lines, "comm     ", &e.event.header.comm, C_PATH);
+            kv(
+                &mut lines,
+                "retval   ",
                 &format!(
                     "{} ({})",
                     e.event.exit_code,
@@ -704,23 +710,28 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
         AppEvent::FileOpen(e) => {
             section(&mut lines, "FileOpen");
 
-            kv(&mut lines, "name ", &e.event.header.comm, C_TEXT);
-            kv(&mut lines, "pid  ", &e.event.header.pid.to_string(), C_TEXT);
+            kv(&mut lines, "name     ", &e.event.header.comm, C_TEXT);
             kv(
                 &mut lines,
-                "ppid ",
+                "pid      ",
+                &e.event.header.pid.to_string(),
+                C_TEXT,
+            );
+            kv(
+                &mut lines,
+                "ppid     ",
                 &e.event.header.ppid.to_string(),
                 C_MUTED,
             );
             kv(
                 &mut lines,
-                "uid  ",
+                "uid      ",
                 &uid_label(e.event.header.uid),
                 uid_color(e.event.header.uid),
             );
             kv(
                 &mut lines,
-                "gid  ",
+                "gid      ",
                 &e.event.header.gid.to_string(),
                 C_MUTED,
             );
@@ -755,7 +766,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
             kv(
                 &mut lines,
                 "retval   ",
-                &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed " }),
+                &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
                 if ok { C_TEXT } else { C_RED },
             );
 
@@ -765,6 +776,7 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
         AppEvent::FileClose(e) => {
             section(&mut lines, "FileClose");
 
+            kv(&mut lines, "name     ", &e.event.header.comm, C_TEXT);
             kv(
                 &mut lines,
                 "pid      ",
@@ -789,8 +801,29 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 &e.event.header.gid.to_string(),
                 C_MUTED,
             );
-            kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
+
+            lines.push(Line::from(""));
+
+            section(&mut lines, "FILE");
+
+            let file_path = &e.event.file_path;
+
+            let path_col = if crate::helper::is_sensitive_path(file_path) {
+                C_RED
+            } else {
+                C_PATH
+            };
+
+            kv(&mut lines, "filepath ", file_path, path_col);
+            kv(&mut lines, "filename ", &e.event.file_path, C_TEXT);
+            kv(&mut lines, "op       ", "Close", C_TEXT);
             kv(&mut lines, "flags    ", &e.event.flags(), C_MUTED);
+            kv(
+                &mut lines,
+                "mode     ",
+                &format!("{:?}", e.event.file_type),
+                C_MUTED,
+            );
 
             let ok = e.event.retval >= 0;
 
@@ -799,19 +832,13 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 "retval   ",
                 &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
                 if ok { C_TEXT } else { C_RED },
-            );
-
-            kv(
-                &mut lines,
-                "mode     ",
-                &format!("{:?}", e.event.file_type),
-                C_MUTED,
             );
         }
 
         AppEvent::FileWrite(e) => {
             section(&mut lines, "FileWrite");
 
+            kv(&mut lines, "name     ", &e.event.header.comm, C_TEXT);
             kv(
                 &mut lines,
                 "pid      ",
@@ -836,8 +863,29 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 &e.event.header.gid.to_string(),
                 C_MUTED,
             );
-            kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
+
+            lines.push(Line::from(""));
+
+            section(&mut lines, "FILE");
+
+            let file_path = &e.event.file_path;
+
+            let path_col = if crate::helper::is_sensitive_path(file_path) {
+                C_RED
+            } else {
+                C_PATH
+            };
+
+            kv(&mut lines, "filepath ", file_path, path_col);
+            kv(&mut lines, "filename ", &e.event.file_path, C_TEXT);
+            kv(&mut lines, "op       ", "Write", C_TEXT);
             kv(&mut lines, "flags    ", &e.event.flags(), C_MUTED);
+            kv(
+                &mut lines,
+                "mode     ",
+                &format!("{:?}", e.event.file_type),
+                C_MUTED,
+            );
 
             let ok = e.event.retval >= 0;
 
@@ -846,67 +894,82 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 "retval   ",
                 &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
                 if ok { C_TEXT } else { C_RED },
-            );
-
-            kv(
-                &mut lines,
-                "mode     ",
-                &format!("{:?}", e.event.file_type),
-                C_MUTED,
             );
         }
 
         AppEvent::FileRename(e) => {
             section(&mut lines, "FileRename");
 
+            kv(&mut lines, "name     ", &e.event.header.comm, C_TEXT);
             kv(
                 &mut lines,
-                "pid           ",
+                "pid      ",
                 &e.event.header.pid.to_string(),
                 C_TEXT,
             );
             kv(
                 &mut lines,
-                "ppid          ",
+                "ppid     ",
                 &e.event.header.ppid.to_string(),
                 C_MUTED,
             );
             kv(
                 &mut lines,
-                "uid           ",
+                "uid      ",
                 &uid_label(e.event.header.uid),
                 uid_color(e.event.header.uid),
             );
             kv(
                 &mut lines,
-                "gid           ",
+                "gid      ",
                 &e.event.header.gid.to_string(),
                 C_MUTED,
             );
-            kv(&mut lines, "old_filename  ", &e.event.old_filename, C_PATH);
-            kv(&mut lines, "new_filename  ", &e.event.new_filename, C_PATH);
+
+            lines.push(Line::from(""));
+
+            section(&mut lines, "FILE");
+
+            let old_path = &e.event.old_filename;
+            let new_path = &e.event.new_filename;
+
+            let old_path_col = if crate::helper::is_sensitive_path(old_path) {
+                C_RED
+            } else {
+                C_PATH
+            };
+
+            let new_path_col = if crate::helper::is_sensitive_path(new_path) {
+                C_RED
+            } else {
+                C_PATH
+            };
+
+            kv(&mut lines, "old_path ", old_path, old_path_col);
+            kv(&mut lines, "new_path ", new_path, new_path_col);
+            kv(&mut lines, "op       ", "Rename", C_TEXT);
             kv(&mut lines, "flags    ", &e.event.flags(), C_MUTED);
+            kv(
+                &mut lines,
+                "mode     ",
+                &format!("{:?}", e.event.file_type),
+                C_MUTED,
+            );
 
             let ok = e.event.retval >= 0;
 
             kv(
                 &mut lines,
-                "retval        ",
+                "retval   ",
                 &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
                 if ok { C_TEXT } else { C_RED },
-            );
-
-            kv(
-                &mut lines,
-                "mode          ",
-                &format!("{:?}", e.event.file_type),
-                C_MUTED,
             );
         }
 
         AppEvent::FileRead(e) => {
             section(&mut lines, "FileRead");
 
+            kv(&mut lines, "name     ", &e.event.header.comm, C_TEXT);
             kv(
                 &mut lines,
                 "pid      ",
@@ -931,8 +994,29 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 &e.event.header.gid.to_string(),
                 C_MUTED,
             );
-            kv(&mut lines, "filepath ", &e.event.file_path, C_PATH);
+
+            lines.push(Line::from(""));
+
+            section(&mut lines, "FILE");
+
+            let file_path = &e.event.file_path;
+
+            let path_col = if crate::helper::is_sensitive_path(file_path) {
+                C_RED
+            } else {
+                C_PATH
+            };
+
+            kv(&mut lines, "filepath ", file_path, path_col);
+            kv(&mut lines, "filename ", &e.event.file_path, C_TEXT);
+            kv(&mut lines, "op       ", "Read", C_TEXT);
             kv(&mut lines, "flags    ", &e.event.flags(), C_MUTED);
+            kv(
+                &mut lines,
+                "mode     ",
+                &format!("{:?}", e.event.file_type),
+                C_MUTED,
+            );
 
             let ok = e.event.retval >= 0;
 
@@ -941,19 +1025,13 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 "retval   ",
                 &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
                 if ok { C_TEXT } else { C_RED },
-            );
-
-            kv(
-                &mut lines,
-                "mode     ",
-                &format!("{:?}", e.event.file_type),
-                C_MUTED,
             );
         }
 
         AppEvent::FileDelete(e) => {
             section(&mut lines, "FileDelete");
 
+            kv(&mut lines, "name     ", &e.event.header.comm, C_TEXT);
             kv(
                 &mut lines,
                 "pid      ",
@@ -978,7 +1056,29 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 &e.event.header.gid.to_string(),
                 C_MUTED,
             );
-            kv(&mut lines, "filename ", &e.event.filename, C_PATH);
+
+            lines.push(Line::from(""));
+
+            section(&mut lines, "FILE");
+
+            let file_path = &e.event.filename;
+
+            let path_col = if crate::helper::is_sensitive_path(file_path) {
+                C_RED
+            } else {
+                C_PATH
+            };
+
+            kv(&mut lines, "filepath ", file_path, path_col);
+            kv(&mut lines, "filename ", file_path, C_TEXT);
+            kv(&mut lines, "op       ", "Delete", C_TEXT);
+            kv(&mut lines, "flags    ", "-", C_MUTED);
+            kv(
+                &mut lines,
+                "mode     ",
+                &format!("{:?}", e.event.file_type),
+                C_MUTED,
+            );
 
             let ok = e.event.retval >= 0;
 
@@ -987,13 +1087,6 @@ fn build_detail_lines(event: &UiEvent, app: &App) -> Text<'static> {
                 "retval   ",
                 &format!("{} ({})", e.event.retval, if ok { "ok" } else { "failed" }),
                 if ok { C_TEXT } else { C_RED },
-            );
-
-            kv(
-                &mut lines,
-                "mode     ",
-                &format!("{:?}", e.event.file_type),
-                C_MUTED,
             );
         }
 
