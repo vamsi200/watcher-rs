@@ -280,6 +280,22 @@ Run it with:
 sudo ./target/release/watcher-rs
 ```
 
+## TUI Controls
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Navigate events |
+| `gg` | Jump to top |
+| `G` | Jump to latest event (follows new events like tail -f) |
+| `p` | Pause / resume event stream |
+| `/` / `f` | Filter events |
+| `t` | Toggle 12/24-hour timestamp format |
+| `Ctrl+l` | Clear events (just from ui, not from disk) |
+| `r` | Reload configuration |
+| `U` | Update database |
+| `q` | Quit |
+
+
 # Architecture
 
 watcher-rs is split between kernel-space eBPF instrumentation and user-space processing.
