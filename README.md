@@ -18,6 +18,15 @@ It is designed to sit somewhere between a traditional system monitor and a secur
 - Live stream / follow-tail mode
 - Persistent event storage per **run**
 
+## Screenshots
+![sc1](screenshots/sc1.png)
+
+![sc2](screenshots/sc2.png)
+
+![sc3](screenshots/sc3.png)
+
+![sc4](screenshots/sc4.png)
+
 # What does watcher-rs observe?
 
 watcher-rs uses **[bpfx](https://github.com/vamsi200/bpfx/)**, an eBPF library written specifically for this project, to collect low-level kernel events.
