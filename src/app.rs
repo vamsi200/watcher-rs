@@ -363,22 +363,22 @@ impl App {
 
         let ev = UiEvent::new(ev);
 
-        if self.is_selected_sev(&ev) {
-            if self.follow_tail {
-                writer_tx.try_send(ev.clone()).ok();
-            } else {
-                writer_tx.send(ev.clone()).await?;
-            }
+        if !self.pause {
+            if self.is_selected_sev(&ev) {
+                if self.follow_tail {
+                    writer_tx.try_send(ev.clone()).ok();
+                } else {
+                    writer_tx.send(ev.clone()).await?;
+                }
 
-            match ev.event.severity() {
-                Severity::Critical => self.crit_ev_count += 1,
-                Severity::High => self.high_ev_count += 1,
-                Severity::Medium => self.med_ev_count += 1,
-                Severity::Low => self.low_ev_count += 1,
-                Severity::Info => self.info_ev_count += 1,
-            }
+                match ev.event.severity() {
+                    Severity::Critical => self.crit_ev_count += 1,
+                    Severity::High => self.high_ev_count += 1,
+                    Severity::Medium => self.med_ev_count += 1,
+                    Severity::Low => self.low_ev_count += 1,
+                    Severity::Info => self.info_ev_count += 1,
+                }
 
-            if !self.pause {
                 let idx = self.events.len();
 
                 self.events.push(ev);
@@ -1019,13 +1019,11 @@ impl App {
     pub fn selected_event(&self) -> Option<&UiEvent> {
         let local = self.stream_state.selected()?;
 
-        let global = self.view_port.window_start + local;
-        let loaded_global_start = self.loaded_range.0 * PER_BATCH_SIZE;
-        let loaded_local = global.checked_sub(loaded_global_start)?;
+        let filtered_idx = self.view_port.window_start + local;
 
-        self.filtered_events
-            .get(loaded_local)
-            .and_then(|&idx| self.events.get(idx))
+        let event_idx = *self.filtered_events.get(filtered_idx)?;
+
+        self.events.get(event_idx)
     }
 }
 

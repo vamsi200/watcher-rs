@@ -452,13 +452,9 @@ async fn start_collectors(
     tx: tokio::sync::mpsc::Sender<AppEvent>,
     config_tx: Sender<ConfigState>,
 ) -> color_eyre::Result<()> {
-    let config = BpfxConfig {
-        channel_capacity: 10000,
-    };
-
     regain_privs()?;
 
-    let mut bpf = Bpfx::with_config(config)?;
+    let mut bpf = Bpfx::with_config(BpfxConfig::default().channel_capacity(10_000))?;
 
     let sources = EventSources {
         process: bpf.subscribe(ProcessFilter::ALL)?,
@@ -474,9 +470,7 @@ async fn start_collectors(
     let runtime = bpf.run();
 
     read_events(tx, shutdown_rx, sources, config_watcher_rx, &config_tx).await?;
-
     drop(runtime);
-
     Ok(())
 }
 
