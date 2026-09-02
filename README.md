@@ -18,6 +18,15 @@ It is designed to sit somewhere between a traditional system monitor and a secur
 - Live stream / follow-tail mode
 - Persistent event storage per **run**
 
+## Screenshots
+![sc1](screenshots/sc1.png)
+
+![sc2](screenshots/sc2.png)
+
+![sc3](screenshots/sc3.png)
+
+![sc4](screenshots/sc4.png)
+
 # What does watcher-rs observe?
 
 watcher-rs uses **[bpfx](https://github.com/vamsi200/bpfx/)**, an eBPF library written specifically for this project, to collect low-level kernel events.
@@ -270,6 +279,22 @@ Run it with:
 ```bash
 sudo ./target/release/watcher-rs
 ```
+
+## TUI Controls
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Navigate events |
+| `gg` | Jump to top |
+| `G` | Jump to latest event (follows new events like tail -f) |
+| `p` | Pause / resume event stream |
+| `/` / `f` | Filter events |
+| `t` | Toggle 12/24-hour timestamp format |
+| `Ctrl+l` | Clear events (just from ui, not from disk) |
+| `r` | Reload configuration |
+| `U` | Update database |
+| `q` | Quit |
+
 
 # Architecture
 
